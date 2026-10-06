@@ -17,6 +17,7 @@ from utils.make_envs_pyenv import (make_bat_fwd_env, make_dc_pyeplus_env,
                                    make_ls_env)
 from utils.managers import (CI_Manager, Time_Manager, Weather_Manager,
                             Workload_Manager)
+from utils.price_manager import PriceManager, is_hq_winter_day
 from utils.utils_cf import get_energy_variables, get_init_day, obtain_paths
 
 import matplotlib
@@ -47,7 +48,18 @@ class EnvConfig(dict):
         
         # Capacity (MW) of the datacenter
         'datacenter_capacity_mw': 1,
-        
+
+        # Hydro-Quebec tariff: None = auto-select by datacenter_capacity_mw
+        # (Rate M below 5,000 kW, Rate L at/above); 'rate_m' | 'rate_l' |
+        # 'new_dc_rate' force one explicitly.
+        'tariff_rate_override': None,
+
+        # Standing demand-charge floor (kW) this facility starts each
+        # episode's running peak from -- stands in for "last winter's
+        # ratcheted billing demand" until real cross-episode carry-over is
+        # threaded through a training run (see PriceManager's docstring).
+        'demand_floor_kw': 0.0,
+
         # Timezone shift
         'timezone_shift': 0,
         
@@ -200,8 +212,14 @@ class SustainDC(gym.Env):
         self.workload_m = Workload_Manager(init_day=self.init_day, workload_filename=self.workload_file, timezone_shift=self.timezone_shift)
         self.weather_m = Weather_Manager(init_day=self.init_day, location=wea_loc, filename=self.weather_file, timezone_shift=self.timezone_shift)
         self.ci_m = CI_Manager(init_day=self.init_day, location=ci_loc, filename=self.ci_file, future_steps=n_vars_ci, timezone_shift=self.timezone_shift)
+        self.tariff_rate_override = env_config.get('tariff_rate_override', None)
+        self.demand_floor_kw = env_config.get('demand_floor_kw', 0.0)
+        self.price_m = PriceManager(datacenter_capacity_mw=self.datacenter_capacity_mw,
+                                    tariff_rate_override=self.tariff_rate_override,
+                                    init_day=self.init_day, future_steps=n_vars_ci,
+                                    demand_floor_kw=self.demand_floor_kw)
 
-        # This actions_are_logits is True only for MADDPG if continuous actions is used on the algorithm.
+        # This actions_are_logits is True only for MADDPG if isscontinuous actions is used on the algorithm.
         self.actions_are_logits = env_config.get("actions_are_logits", False)
         
         # # Plots for the rendering
@@ -299,14 +317,26 @@ class SustainDC(gym.Env):
 
         return ci_features
 
-    def _create_ls_state(self, t_i, current_workload, queue_status, current_ci, ci_future, ci_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram):
+    def _price_feature_block(self):
+        """[current energy price (normalized), progress toward Rate M's
+        tier-2 threshold, normalized running peak demand this billing
+        period] -- roadmap item 3's "expose monthly peak demand as separate
+        state from day 1." Computed once per step and shared by all three
+        state builders, mirroring how the CI block is threaded through."""
+        return np.array([
+            self.price_m.get_current_price(),
+            self.price_m.get_tier2_progress_fraction(),
+            self.price_m.get_normalized_peak(),
+        ], dtype=np.float32)
+
+    def _create_ls_state(self, t_i, current_workload, queue_status, current_ci, ci_future, ci_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, price_features):
         """
         Create the state of the load shifting environment.
 
         Returns:
             np.ndarray: State of the load shifting environment.
         """
-        hour_sin_cos = t_i[:2]
+        hour_cos_sin = t_i[:2]
 
         # CI Trend analysis
         trend_smoothing_window = 4
@@ -340,7 +370,7 @@ class SustainDC(gym.Env):
         
         # Combine all features into the state
         ls_state = np.float32(np.hstack((
-                                        hour_sin_cos,
+                                        hour_cos_sin,
                                         current_ci,
                                         ci_features,
                                         oldest_task_age,
@@ -349,20 +379,21 @@ class SustainDC(gym.Env):
                                         current_workload,
                                         current_out_temperature,
                                         temperature_features,
-                                        ls_task_age_histogram
+                                        ls_task_age_histogram,
+                                        price_features
                                     )))
-        if len(ls_state) != 26:
+        if len(ls_state) != 29:
             print(f'Error: {len(ls_state)}')
         return ls_state
-    
-    def _create_dc_state(self, t_i, current_workload, next_workload, current_ci, ci_future, ci_past, current_out_temperature, next_out_temperature):
+
+    def _create_dc_state(self, t_i, current_workload, next_workload, current_ci, ci_future, ci_past, current_out_temperature, next_out_temperature, price_features):
         """
         Create the state of the data center environment.
 
         Returns:
             np.ndarray: State of the data center environment.
         """
-        hour_sin_cos = t_i[:2]
+        hour_cos_sin = t_i[:2]
         
         # CI Trend analysis
         trend_smoothing_window = 4
@@ -383,26 +414,27 @@ class SustainDC(gym.Env):
                     ])
 
 
-        dc_state = np.float32(np.hstack((hour_sin_cos,
+        dc_state = np.float32(np.hstack((hour_cos_sin,
                                          current_ci,
                                          ci_features,
-                                         current_workload, 
+                                         current_workload,
                                          next_workload,
                                          current_out_temperature,
                                          next_out_temperature,
+                                         price_features,
                                         )))
-        
+
         return dc_state
 
 
-    def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature):
+    def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature, price_features):
         """
         Create the state of the battery environment.
 
         Returns:
             np.ndarray: State of the battery environment.
         """
-        hour_sin_cos = t_i[:2]
+        hour_cos_sin = t_i[:2]
         
         # CI Trend analysis
         trend_smoothing_window = 4
@@ -423,12 +455,13 @@ class SustainDC(gym.Env):
                     ])
 
 
-        bat_state = np.float32(np.hstack((hour_sin_cos,
+        bat_state = np.float32(np.hstack((hour_cos_sin,
                                           current_ci,
                                           ci_features,
                                           current_workload,
                                           current_temperature,
-                                          battery_soc
+                                          battery_soc,
+                                          price_features
                                         )))
         return bat_state
 
@@ -459,7 +492,13 @@ class SustainDC(gym.Env):
         workload = self.workload_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Workload manager
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Weather manager
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # CI manager. ci_i -> CI in the current timestep.
-        
+        # Price manager: carry the previous episode's running peak demand
+        # forward (self.price_m persists across reset() calls on this same
+        # env instance -- this is what makes the demand-charge ratchet span
+        # episode boundaries, per PriceManager's docstring).
+        self.price_m.reset(init_day=random_init_day, init_hour=random_init_hour,
+                           peak_carry_kw=self.price_m.ending_peak_kw)
+
         # Set the external ambient temperature to data center environment
         self.dc_env.set_ambient_temp(temp, wet_bulb)
         
@@ -485,13 +524,14 @@ class SustainDC(gym.Env):
         oldest_task_age = self.ls_info['ls_oldest_task_age']
         average_task_age = self.ls_info['ls_average_task_age']
         ls_task_age_histogram = self.ls_info['ls_task_age_histogram']
-        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram)
-        
-        self.dc_state = self._create_dc_state(t_i, current_workload, next_workload,  ci_i, ci_i_future, ci_i_past, current_out_temperature, next_out_temperature)
+        price_features = self._price_feature_block()
+        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, price_features)
+
+        self.dc_state = self._create_dc_state(t_i, current_workload, next_workload,  ci_i, ci_i_future, ci_i_past, current_out_temperature, next_out_temperature, price_features)
         # bat_state -> [time (sine/cosine enconded), battery SoC, current+future normalized CI]
         # self.bat_state = np.float32(np.hstack((t_i, bat_s, ci_i_future)))
         battery_soc = self.bat_env.get_battery_soc()
-        self.bat_state = self._create_bat_state(t_i, current_workload, battery_soc, ci_i, ci_i_future, ci_i_past, current_out_temperature)
+        self.bat_state = self._create_bat_state(t_i, current_workload, battery_soc, ci_i, ci_i_future, ci_i_past, current_out_temperature, price_features)
 
         # Update ci in the battery environment
         self.bat_env.update_ci(ci_i_denorm, ci_i_future[0])
@@ -556,7 +596,14 @@ class SustainDC(gym.Env):
         workload = self.workload_m.step()
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.step()
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.step()
-        
+        # Price manager: must advance AFTER _perform_actions() (above), since
+        # it needs THIS step's actual metered energy -- battery-inclusive,
+        # i.e. the real grid draw -- which only exists once bat_env.step()
+        # has run (see PriceManager's module docstring).
+        self.price_m.step(
+            metered_energy_kwh=self.bat_info['bat_total_energy_with_battery_KWh'],
+            is_winter=is_hq_winter_day(day))
+
         self.current_hour = hour
 
         # Update environment states with new values from managers
@@ -575,11 +622,12 @@ class SustainDC(gym.Env):
         next_n_out_temperature = self.weather_m.get_n_next_temperature(n=16)
 
         
-        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, norm_temp, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram)
-        self.dc_state = self._create_dc_state(t_i, workload, next_workload,  ci_i, ci_i_future, ci_i_past, norm_temp, next_out_temperature)
-        
+        price_features = self._price_feature_block()
+        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, norm_temp, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, price_features)
+        self.dc_state = self._create_dc_state(t_i, workload, next_workload,  ci_i, ci_i_future, ci_i_past, norm_temp, next_out_temperature, price_features)
+
         battery_soc = self.bat_env.get_battery_soc()
-        self.bat_state = self._create_bat_state(t_i, workload, battery_soc, ci_i, ci_i_future, ci_i_past, norm_temp)
+        self.bat_state = self._create_bat_state(t_i, workload, battery_soc, ci_i, ci_i_future, ci_i_past, norm_temp, price_features)
 
         # Populate observation dictionary based on updated states
         obs = self._populate_observation_dict()
@@ -679,7 +727,12 @@ class SustainDC(gym.Env):
             **self.bat_info, **self.ls_info, **self.dc_info,
             "outside_temp": temp, "day": day, "hour": hour,
             "norm_CI": ci_i_future[0], "forecast_CI": ci_i_future,
-            "isterminal": terminal
+            "isterminal": terminal,
+            "norm_price": self.price_m.get_current_price(),
+            "price_denorm_c_per_kwh": self.price_m.get_current_price_denorm(),
+            "energy_cost_this_step_c": self.price_m.get_energy_cost_this_step_c(),
+            "demand_charge_increment_c": self.price_m.get_demand_charge_increment_c(),
+            "optimization_charge_increment_c": self.price_m.get_optimization_charge_increment_c(),
         }
 
 

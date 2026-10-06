@@ -27,8 +27,14 @@ class SustainDCPettingZooEnv(ParallelEnv):
         self.action_spaces = {agent: space for agent, space in zip(self.possible_agents, self.env.action_space)}
         
         if env_config['nonoverlapping_shared_obs_space']:
-            # ls_state[0:10]->10 variables; dc_state[4:9]->5 variables & bat_state[5]->1 variable
-            self.share_observation_space = {agent: spaces.Box(low=-2.0, high=2.0, shape=(29,), dtype=np.float32) for agent in self.possible_agents}
+            # The shared obs is built in harlsustaindc_env._create_shared_observation
+            # as: the whole ls_state, + 2 dc_state features not already in it
+            # (next_workload, next_exterior_temp), + 1 bat_state feature
+            # (battery SOC). DERIVED from the ls space rather than hardcoded, so
+            # adding features to the agent states (e.g. the price block) can't
+            # silently desync this from the data actually produced.
+            shared_dim = self.observation_spaces['agent_ls'].shape[0] + 2 + 1
+            self.share_observation_space = {agent: spaces.Box(low=-2.0, high=2.0, shape=(shared_dim,), dtype=np.float32) for agent in self.possible_agents}
         else:
             # Find the maximum dimension of observation space
             max_obs_dim = max(space.shape[0] for space in self.observation_spaces.values())

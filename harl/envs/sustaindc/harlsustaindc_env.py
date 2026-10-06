@@ -77,7 +77,13 @@ class HARLSustainDCEnv:
             # The whole information available without repeating the same information
             concat_states.extend(states[0]) # ls_state
             concat_states.extend([states[1][11], states[1][13]]) # dc_state (next_workload and next_exterior_temp)
-            concat_states.extend([states[2][-1]]) # bat_state (SOC)
+            # bat_state (SOC). Index is explicit, NOT [-1]: the bat state now
+            # ends with the 3-element price feature block (see
+            # sustaindc_env._price_feature_block), so [-1] would silently pick
+            # up normalized peak demand instead of the battery's SOC.
+            # bat_state layout: hour_cos_sin(2) + current_ci(1) + ci_features(7)
+            #                 + workload(1) + temperature(1) + SOC(1) + price(3)
+            concat_states.extend([states[2][12]]) # bat_state (SOC)
             
 
             states = np.array(concat_states, dtype=np.float32)

@@ -130,6 +130,34 @@ def default_bat_reward(params: dict) -> float:
     return footprint_reward
 
 
+def default_price_reward(params: dict) -> float:
+    """
+    Cost-based reward: the negative of this step's real Hydro-Quebec bill
+    (energy cost + any new demand-charge peak + any Rate L winter-overrun
+    charge), scaled down to keep magnitudes RL-friendly. 
+    Unlike `default_bat_reward`'s CI-weighted reward,
+    this is NOT z-score normalized against a rolling history: a real bill
+    should read as a stable, directly interpretable cost signal, not one
+    whose meaning drifts with `energy_history`'s recent statistics.
+
+    Args:
+        params (dict): Dictionary containing parameters (populated by
+            sustaindc_env.py._calculate_reward_params from utils.price_manager.PriceManager):
+            energy_cost_this_step_c (float): exact tier-aware energy cost this step, cents.
+            demand_charge_increment_c (float): new-peak demand charge this step, cents (usually 0.0).
+            optimization_charge_increment_c (float): Rate L winter-overrun charge this step, cents
+                (a spike once per day, only under Rate L in winter; 0.0 otherwise).
+
+    Returns:
+        float: Reward value.
+    """
+    reward_scale = 0.01   # cents -> O(1) reward, matching v1/v2/v3's reward_scale precedent
+    total_cost_c = (params['energy_cost_this_step_c']
+                    + params['demand_charge_increment_c']
+                    + params['optimization_charge_increment_c'])
+    return -1.0 * total_cost_c * reward_scale
+
+
 def custom_agent_reward(params: dict) -> float:
     """
     A template for creating a custom agent reward function.
@@ -326,6 +354,7 @@ REWARD_METHOD_MAP = {
     # Add custom reward methods here
     'custom_agent_reward' : custom_agent_reward,
     'tou_reward' : tou_reward,
+    'default_price_reward' : default_price_reward,
     'renewable_energy_reward' : renewable_energy_reward,
     'energy_efficiency_reward' : energy_efficiency_reward,
     'energy_PUE_reward' : energy_PUE_reward,

@@ -20,8 +20,10 @@ class BatteryEnvFwd(gym.Env):
         n_fwd_steps = env_config['n_fwd_steps']
         max_bat_cap = env_config['max_bat_cap']
         charging_rate = env_config['charging_rate']
-        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(13)),
-                                            high=np.float32(1.0 * np.ones(13)))
+        # 13 + 3 price features (current price, tier-2 progress, normalized
+        # peak demand) -- see sustaindc_env.py's _price_feature_block().
+        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(16)),
+                                            high=np.float32(1.0 * np.ones(16)))
         
         self.max_dc_pw_MW = env_config['max_dc_pw_MW'] # 7.24  # in MW
         self.action_space = spaces.Discrete(3)

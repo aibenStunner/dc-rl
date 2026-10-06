@@ -9,7 +9,23 @@ individual_reward_weight: 0.8
 flexible_load: 0.6
 ls_reward: default_ls_reward
 dc_reward: default_dc_reward
-bat_reward: default_bat_reward
+bat_reward: default_price_reward
+
+# Capacity (MW) of the datacenter -- also drives Hydro-Quebec tariff
+# auto-selection (Rate M below 5,000 kW / 5 MW, Rate L at/above). See
+# utils/price_manager.py.
+datacenter_capacity_mw: 1
+
+# None = auto-select by datacenter_capacity_mw; 'rate_m' | 'rate_l' |
+# 'new_dc_rate' force one explicitly (the last is Hydro-Quebec's proposed,
+# not-yet-approved large-data-centre rate -- an explicit approximation,
+# never auto-selected).
+tariff_rate_override: null
+
+# Standing demand-charge floor (kW) this facility's running peak starts
+# from -- stands in for "last winter's ratcheted billing demand" (Rate M's
+# 65% rule) until real historical demand data is available.
+demand_floor_kw: 0.0
 dc_config_file: 'dc_config.json'
 month: 6
 days_per_episode: 30
