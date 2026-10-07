@@ -7,6 +7,7 @@ import supersuit as ss
 
 from harl.envs.sustaindc.sustaindc_ptzoo import SustainDCPettingZooEnv
 from pettingzoo.utils.conversions import parallel_wrapper_fn
+from sustaindc_env import SustainDC  # for the published observation layout indices
 class HARLSustainDCEnv:
     def __init__(self, env_args):
         """
@@ -76,14 +77,15 @@ class HARLSustainDCEnv:
             
             # The whole information available without repeating the same information
             concat_states.extend(states[0]) # ls_state
-            concat_states.extend([states[1][11], states[1][13]]) # dc_state (next_workload and next_exterior_temp)
-            # bat_state (SOC). Index is explicit, NOT [-1]: the bat state now
-            # ends with the 3-element price feature block (see
-            # sustaindc_env._price_feature_block), so [-1] would silently pick
-            # up normalized peak demand instead of the battery's SOC.
-            # bat_state layout: hour_cos_sin(2) + current_ci(1) + ci_features(7)
-            #                 + workload(1) + temperature(1) + SOC(1) + price(3)
-            concat_states.extend([states[2][12]]) # bat_state (SOC)
+            # dc_state (next_workload and next_exterior_temp) and bat_state
+            # (SOC), picked by POSITION. The positions are imported from
+            # SustainDC rather than hardcoded here: these indices shift
+            # whenever the shared observation prefix changes, and a stale
+            # literal fails SILENTLY (the critic trains on the wrong feature)
+            # rather than raising. See SustainDC.DC_IDX / BAT_IDX.
+            concat_states.extend([states[1][SustainDC.DC_IDX["next_workload"]],
+                                  states[1][SustainDC.DC_IDX["next_out_temp"]]])
+            concat_states.extend([states[2][SustainDC.BAT_IDX["battery_soc"]]])
             
 
             states = np.array(concat_states, dtype=np.float32)

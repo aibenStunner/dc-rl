@@ -111,10 +111,10 @@ def make_dc_pyeplus_env(month : int = 1,
         # TODO: Will add sum of IT POWER  and HVAC Power Here if AGP wants it
         'Facility Total Building Electricity Demand Rate(Whole Building)'  #  'IT POWER'
     ]
-    # 14 + 3 price features (current price, tier-2 progress, normalized peak
-    # demand) -- see sustaindc_env.py's _price_feature_block().
-    observation_space = spaces.Box(low=np.float32(-1.0*np.ones(17)),
-                                    high=np.float32(1.0*np.ones(17)),
+    # 14 + 3 price features (_price_feature_block) + 2 season features
+    # (cos_day/sin_day) -- see sustaindc_env.py's state builders.
+    observation_space = spaces.Box(low=np.float32(-1.0*np.ones(19)),
+                                    high=np.float32(1.0*np.ones(19)),
                                     )
 
     

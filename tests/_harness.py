@@ -1,10 +1,8 @@
 """Shared test-runner harness for dc-rl's test suite.
 
 This repo has no pytest dependency (it is not in requirements.txt and is not
-installed in the `thesis-dcrl` env), so tests are written to be runnable with
-bare `python3` -- the same convention this thesis's v1/v2a/v2b/v3 models use
-in their `test_invariance.py` files: plain module-level `test_*` functions,
-collected and run by a small runner.
+installed in the `thesis-dcrl` env), so tests use plain module-level
+`test_*` functions collected and run by a small standalone runner.
 
 Each test module ends with:
 

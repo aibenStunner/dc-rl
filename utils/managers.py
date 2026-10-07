@@ -62,6 +62,27 @@ def normalize(v, min_v, max_v):
     """
     return (v - min_v)/(max_v - min_v)
 
+def _cyc(array, start, n):
+    """`n` consecutive values from `array` starting at `start`, wrapping at the
+    year boundary.
+
+    These arrays hold exactly one annual cycle (365*96 = 35040 points) and each
+    manager's step() already wraps its own pointer when it reaches the end, so
+    the lookahead/lookback WINDOWS must wrap too. Without this an episode
+    starting near 31 December gets a SHORT forward window -- and once it is
+    empty, the np.polyfit in sustaindc_env._create_ls_state raises
+    "SVD did not converge in Linear Least Squares" -- while one starting on
+    1 January gets an EMPTY backward window (the slice [-16:0]). Both were
+    latent while episodes were confined to a +/-7 day window around July.
+    """
+    return np.take(array, np.arange(start, start + n), mode="wrap")
+
+
+def _cyc_at(array, idx):
+    """Single value at `idx`, wrapping at the year boundary (see _cyc)."""
+    return array[idx % len(array)]
+
+
 # Function to generate cosine and sine values for a given hour and day
 def sc_obs(current_hour, current_day):
     """Generate sine and cosine of the hour and day
@@ -278,7 +299,7 @@ class Workload_Manager():
             # self.cpu_smooth = np.ones_like(self.cpu_smooth) * 0.6
 
         self._current_workload = self.cpu_smooth[self.time_step]
-        self._next_workload = self.cpu_smooth[self.time_step + 1]
+        self._next_workload = _cyc_at(self.cpu_smooth, self.time_step + 1)
         return self._current_workload
         
     # Function to advance the time step and return the workload at the new time step
@@ -296,7 +317,7 @@ class Workload_Manager():
             self.time_step = self.init_time_step
         
         self._current_workload = self.cpu_smooth[self.time_step]
-        self._next_workload = self.cpu_smooth[self.time_step + 1]
+        self._next_workload = _cyc_at(self.cpu_smooth, self.time_step + 1)
         
         # assert self.time_step < len(self.cpu_smooth), f'Episode length: {self.time_step} is longer than the provide cpu_smooth: {len(self.cpu_smooth)}'
         return self._current_workload  # to avoid logical error
@@ -311,7 +332,7 @@ class Workload_Manager():
         self.cpu_smooth[self.time_step] = workload
         
     def get_n_next_workloads(self, n):
-        return self.cpu_smooth[self.time_step+1:self.time_step+1+n]
+        return _cyc(self.cpu_smooth, self.time_step + 1, n)
 
 
 # Class to manage carbon intensity data
@@ -440,11 +461,11 @@ class CI_Manager():
             # self.norm_carbon = self.carbon_smooth
         
         self._current_carbon_smooth = self.carbon_smooth[self.time_step]
-        self._next_carbon_smooth = self.carbon_smooth[self.time_step + 1]
+        self._next_carbon_smooth = _cyc_at(self.carbon_smooth, self.time_step + 1)
         
         self._current_norm_carbon = self.norm_carbon[self.time_step]
-        self._next_norm_carbon = self.norm_carbon[self.time_step + 1]
-        self._forecast_norm_carbon = self.norm_carbon[(self.time_step+1):(self.time_step+1)+self.future_steps]
+        self._next_norm_carbon = _cyc_at(self.norm_carbon, self.time_step + 1)
+        self._forecast_norm_carbon = _cyc(self.norm_carbon, self.time_step + 1, self.future_steps)
 
         return self._current_norm_carbon, self._forecast_norm_carbon, self._current_carbon_smooth
     
@@ -468,8 +489,8 @@ class CI_Manager():
 
         self._current_carbon_smooth = self.carbon_smooth[self.time_step]
         self._current_norm_carbon = self.norm_carbon[self.time_step]
-        self._next_norm_carbon = self.norm_carbon[self.time_step + 1]
-        self._forecast_norm_carbon = self.norm_carbon[(self.time_step+1):(self.time_step+1)+self.future_steps]
+        self._next_norm_carbon = _cyc_at(self.norm_carbon, self.time_step + 1)
+        self._forecast_norm_carbon = _cyc(self.norm_carbon, self.time_step + 1, self.future_steps)
 
         return self._current_norm_carbon, self._forecast_norm_carbon, self._current_carbon_smooth
     
@@ -480,7 +501,7 @@ class CI_Manager():
         return self._forecast_norm_carbon
     
     def get_n_past_ci(self, n):
-        return self.norm_carbon[self.time_step-n:self.time_step]
+        return _cyc(self.norm_carbon, self.time_step - n, n)
 
 # Class to manage weather data
 # Where to obtain other weather files:
@@ -619,9 +640,9 @@ class Weather_Manager():
             self.wet_bulb_data = np.ones_like(self.wet_bulb_data) * 25
             
         self._current_temp = self.temperature_data[self.time_step]
-        self._next_temp = self.temperature_data[self.time_step + 1]
+        self._next_temp = _cyc_at(self.temperature_data, self.time_step + 1)
         self._current_norm_temp = self.norm_temp_data[self.time_step]
-        self._next_norm_temp = self.norm_temp_data[self.time_step + 1]
+        self._next_norm_temp = _cyc_at(self.norm_temp_data, self.time_step + 1)
         self._current_wet_bulb = self.wet_bulb_data[self.time_step]
         self._current_norm_wet_bulb = self.norm_wet_bulb_data[self.time_step]
         
@@ -645,9 +666,9 @@ class Weather_Manager():
             self.time_step = self.init_day*self.time_steps_day
             
         self._current_temp = self.temperature_data[self.time_step]
-        self._next_temp = self.temperature_data[self.time_step + 1]
+        self._next_temp = _cyc_at(self.temperature_data, self.time_step + 1)
         self._current_norm_temp = self.norm_temp_data[self.time_step]
-        self._next_norm_temp = self.norm_temp_data[self.time_step + 1]
+        self._next_norm_temp = _cyc_at(self.norm_temp_data, self.time_step + 1)
         self._current_wet_bulb = self.wet_bulb_data[self.time_step]
         self._current_norm_wet_bulb = self.norm_wet_bulb_data[self.time_step]
             
@@ -660,7 +681,7 @@ class Weather_Manager():
         return self._next_norm_temp
     
     def get_n_next_temperature(self, n):
-        return self.norm_temp_data[self.time_step+1:self.time_step+1+n]
+        return _cyc(self.norm_temp_data, self.time_step + 1, n)
     
     def get_current_wet_bulb(self):
         return self._current_wet_bulb

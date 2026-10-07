@@ -100,8 +100,8 @@ def test_rate_m_tier_boundary_hand_computed():
 
 def test_rate_m_tier2_is_reached_at_thesis_scale():
     """At the roadmap's target 5-20 MW scale, tier 2 must be reached WITHIN
-    a single ~30-day episode -- confirms tier 2 isn't dead code here, unlike
-    v3's smaller facility (v3/scenario/tariffs.py deliberately skips it)."""
+    a single ~30-day episode -- confirms tier 2 is exercised at the
+    configured thesis-scale facility rather than remaining dead code."""
     pm = PriceManager(datacenter_capacity_mw=5.0, tariff_rate_override="rate_m")
     pm.reset()
     steps_per_day = 96
@@ -183,6 +183,62 @@ def test_rate_l_optimization_charge_only_fires_on_winter_overrun():
     overrun_kw = 7_000.0 - 1.10 * 6_000.0
     expected_c = overrun_kw * RATE_L.optimization_charge_c_per_kw_day
     assert abs(total_opt_c - expected_c) < 1e-6
+
+
+def test_winter_ratchet_tracks_observed_winter_peak():
+    """Rate M article 4.4: the minimum billing demand for a period is 65% of
+    the max demand recorded in winter. That floor must be DERIVED from winter
+    demand the facility actually drew, not supplied by hand."""
+    pm = PriceManager(datacenter_capacity_mw=2.0, tariff_rate_override="rate_m")
+    pm.reset(peak_carry_kw=0.0)
+    assert pm.peak_kw == 0.0                      # nothing observed yet
+    for _ in range(96):                            # one winter day at 1200 kW
+        pm.step(metered_energy_kwh=1200.0 * 0.25, is_winter=True)
+    assert pm.winter_peak_kw == 1200.0
+
+    pm.reset(peak_carry_kw=0.0)                    # next period, nothing carried
+    assert abs(pm.peak_kw - 0.65 * 1200.0) < 1e-9
+    assert abs(pm.ratcheted_floor_kw - 780.0) < 1e-9
+    # a quiet step must be billed against the floor, not against zero
+    pm.step(metered_energy_kwh=10.0 * 0.25, is_winter=False)
+    assert pm.get_demand_charge_increment_c() == 0.0
+    assert pm.peak_kw == 780.0
+
+
+def test_summer_demand_does_not_feed_the_winter_ratchet():
+    """Only winter steps may raise winter_peak_kw (article 4.4 is explicitly
+    scoped to the winter period)."""
+    pm = PriceManager(datacenter_capacity_mw=2.0, tariff_rate_override="rate_m")
+    pm.reset(peak_carry_kw=0.0)
+    for _ in range(96):
+        pm.step(metered_energy_kwh=1800.0 * 0.25, is_winter=False)
+    assert pm.winter_peak_kw == 0.0
+    pm.reset(peak_carry_kw=0.0)
+    assert pm.peak_kw == 0.0                       # no winter -> no ratchet floor
+
+
+def test_winter_peak_survives_reset_and_only_climbs():
+    """The trailing-12-month window spans episodes, so winter_peak_kw must
+    NOT be cleared by reset(), and a milder winter must not lower it."""
+    pm = PriceManager(datacenter_capacity_mw=2.0, tariff_rate_override="rate_m")
+    pm.reset(peak_carry_kw=0.0)
+    pm.step(metered_energy_kwh=1500.0 * 0.25, is_winter=True)
+    assert pm.winter_peak_kw == 1500.0
+    pm.reset(peak_carry_kw=0.0)
+    assert pm.winter_peak_kw == 1500.0             # survived the reset
+    pm.step(metered_energy_kwh=400.0 * 0.25, is_winter=True)   # milder winter
+    assert pm.winter_peak_kw == 1500.0             # ratchets never fall
+
+
+def test_rate_l_has_no_winter_ratchet():
+    """Rate L's floor is its negotiated contract power, not a 65% ratchet."""
+    pm = PriceManager(datacenter_capacity_mw=20.0, tariff_rate_override="rate_l")
+    pm.reset(peak_carry_kw=0.0)
+    for _ in range(96):
+        pm.step(metered_energy_kwh=9000.0 * 0.25, is_winter=True)
+    pm.reset(peak_carry_kw=0.0)
+    assert pm.ratcheted_floor_kw == 0.0
+    assert RATE_L.winter_ratchet_fraction is None
 
 
 def test_rate_m_never_bills_optimization_charge():

@@ -42,9 +42,9 @@ class CarbonLoadEnv(gym.Env):
         
         # State: [Sin(h), Cos(h), Sin(day_of_year), Cos(day_of_year), self.ls_state, ci_i_future (n_vars_ci), var_to_LS_energy (n_vars_energy), batSoC (n_vars_battery)],
         # self.ls_state = [current_workload, queue status]
-        # 26 + 3 price features (current price, tier-2 progress, normalized
-        # peak demand) -- see sustaindc_env.py's _price_feature_block().
-        self.observation_space = spaces.Box(low=-2.0, high=2.0, shape=(29,), dtype=np.float32)
+        # 26 + 3 price features (_price_feature_block) + 2 season features
+        # (cos_day/sin_day) -- see sustaindc_env.py's state builders.
+        self.observation_space = spaces.Box(low=-2.0, high=2.0, shape=(31,), dtype=np.float32)
 
 
         self.global_total_steps = 0

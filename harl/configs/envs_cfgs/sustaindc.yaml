@@ -16,6 +16,12 @@ bat_reward: default_price_reward
 # utils/price_manager.py.
 datacenter_capacity_mw: 1
 
+# Sample each episode's start day from the whole year rather than a +/-7 day
+# window around `month`. Must be True for HQ's winter period (Dec 1 - Mar 31)
+# to be reached at all -- with month: 6 every episode sits in July and the
+# demand ratchet and Rate L winter overrun charge never fire.
+sample_whole_year: True
+
 # None = auto-select by datacenter_capacity_mw; 'rate_m' | 'rate_l' |
 # 'new_dc_rate' force one explicitly (the last is Hydro-Quebec's proposed,
 # not-yet-approved large-data-centre rate -- an explicit approximation,

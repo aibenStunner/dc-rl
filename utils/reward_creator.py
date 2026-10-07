@@ -151,7 +151,7 @@ def default_price_reward(params: dict) -> float:
     Returns:
         float: Reward value.
     """
-    reward_scale = 0.01   # cents -> O(1) reward, matching v1/v2/v3's reward_scale precedent
+    reward_scale = 0.01   # cents -> O(1) reward for stable RL training
     total_cost_c = (params['energy_cost_this_step_c']
                     + params['demand_charge_increment_c']
                     + params['optimization_charge_increment_c'])

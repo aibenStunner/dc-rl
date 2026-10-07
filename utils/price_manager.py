@@ -20,14 +20,17 @@ KNOWN LIMITATIONS (deliberately out of scope, not silently approximated):
   - The medium/high-voltage supply credit and transformation-loss
     adjustment (articles 12.2/12.4) are not modelled: both require a
     customer's specific supply voltage, which SustainDC has no concept of.
-  - The winter ratchet (Rate M's minimum billing demand = 65% of the max
-    demand during the winter portion of the TRAILING 12 REAL MONTHS) cannot
-    be computed from a single ~30-day episode. It is instead modelled the
-    way v3/costing.py models its analogous problem: as a `demand_floor_kw`
-    the CALLER supplies to reset() (a running peak carried forward from
-    episode to episode, or a config constant standing in for "last winter's
-    max demand" until real multi-episode carry-over is wired up in the
-    training loop). See PriceManager.reset()'s docstring. Consequently
+  - Rate M's winter ratchet (minimum billing demand = 65% of the max demand
+    during the winter portion of the trailing 12 months) is tracked across
+    episodes via `winter_peak_kw`, which accumulates on every winter step and
+    is NOT cleared by reset(). The floor applied at reset is
+    max(peak_carry_kw, demand_floor_kw, 0.65 * winter_peak_kw). This is a
+    trailing-maximum approximation of the real 12-month window: the real rule
+    ages peaks out after 12 months, whereas `winter_peak_kw` here only ever
+    climbs. For training that is the conservative direction (the floor never
+    silently drops), but it is not a faithful 12-month rolling window.
+  - Episodes must actually VISIT winter for any of this to engage. See
+    SustainDC's `sample_whole_year` config key. Consequently
     `TariffSpec.winter_ratchet_fraction` (0.65) is RECORDED BUT NOT APPLIED
     by any computation here -- the caller applies it when choosing
     `demand_floor_kw`.
@@ -223,6 +226,9 @@ class PriceManager:
         self._day_peak_kw = 0.0
         self._step_in_day = 0
         self._month_optimization_charge_c = 0.0
+        # Survives reset(): Rate M's winter ratchet looks back over the
+        # trailing 12 months, which spans many episodes.
+        self.winter_peak_kw = 0.0
 
         self.reset(init_day=init_day, init_hour=0, peak_carry_kw=demand_floor_kw)
 
@@ -303,7 +309,18 @@ class PriceManager:
         matching CI_Manager.reset()'s 3-tuple shape.
         """
         self.month_energy_kwh = 0.0
-        self.peak_kw = max(peak_carry_kw, self.demand_floor_kw)
+        # Rate M's minimum billing demand (article 4.4): 65% of the maximum
+        # demand recorded during a winter-period consumption period in the
+        # trailing 12 months. `winter_peak_kw` accumulates across episodes
+        # (it is NOT cleared here) precisely so this floor can be derived from
+        # demand the facility actually drew in winter, rather than supplied by
+        # hand. Before any winter step has been seen it is 0.0 and the floor
+        # falls back to the configured `demand_floor_kw`.
+        ratcheted_floor_kw = 0.0
+        if self.tariff.winter_ratchet_fraction is not None:
+            ratcheted_floor_kw = self.tariff.winter_ratchet_fraction * self.winter_peak_kw
+        self.ratcheted_floor_kw = ratcheted_floor_kw
+        self.peak_kw = max(peak_carry_kw, self.demand_floor_kw, ratcheted_floor_kw)
         # Fixed for the whole period: Rate L's "contract power" (article 5.3)
         # is a pre-set, negotiated quantity, not the running peak this same
         # period's own overrun is busy ratcheting up -- using self.peak_kw
@@ -331,11 +348,18 @@ class PriceManager:
         energy this step (kWh, always >= 0 -- see module docstring; pass
         bat_info['bat_total_energy_with_battery_KWh'], called after
         bat_env.step()). `is_winter`: whether this step falls in HQ's winter
-        period (Dec 1 - Mar 31); only affects Rate L's optimization charge.
+        period (Dec 1 - Mar 31). Drives BOTH Rate L's optimization charge
+        and Rate M's winter-ratchet tracking (article 4.4).
 
         Returns the same 3-tuple shape as reset()/CI_Manager.step().
         """
         metered_power_kw = metered_energy_kwh / self.dt_hours
+
+        # Feed Rate M's winter ratchet (article 4.4). Tracked on every winter
+        # step and deliberately NOT reset between episodes, so next period's
+        # minimum billing demand reflects this winter's actual maximum.
+        if is_winter:
+            self.winter_peak_kw = max(self.winter_peak_kw, metered_power_kw)
 
         prev_peak = self.peak_kw
         self.peak_kw = max(self.peak_kw, metered_power_kw)

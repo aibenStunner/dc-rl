@@ -49,6 +49,12 @@ class EnvConfig(dict):
         # Capacity (MW) of the datacenter
         'datacenter_capacity_mw': 1,
 
+        # Sample each episode's start day from the whole year instead of a
+        # +/-7 day window around `month`. Required for HQ's winter period
+        # (Dec 1 - Mar 31) to ever be reached -- the demand ratchet and
+        # Rate L's overrun charge are unreachable without it.
+        'sample_whole_year': False,
+
         # Hydro-Quebec tariff: None = auto-select by datacenter_capacity_mw
         # (Rate M below 5,000 kW, Rate L at/above); 'rate_m' | 'rate_l' |
         # 'new_dc_rate' force one explicitly.
@@ -212,6 +218,7 @@ class SustainDC(gym.Env):
         self.workload_m = Workload_Manager(init_day=self.init_day, workload_filename=self.workload_file, timezone_shift=self.timezone_shift)
         self.weather_m = Weather_Manager(init_day=self.init_day, location=wea_loc, filename=self.weather_file, timezone_shift=self.timezone_shift)
         self.ci_m = CI_Manager(init_day=self.init_day, location=ci_loc, filename=self.ci_file, future_steps=n_vars_ci, timezone_shift=self.timezone_shift)
+        self.sample_whole_year = env_config.get('sample_whole_year', False)
         self.tariff_rate_override = env_config.get('tariff_rate_override', None)
         self.demand_floor_kw = env_config.get('demand_floor_kw', 0.0)
         self.price_m = PriceManager(datacenter_capacity_mw=self.datacenter_capacity_mw,
@@ -317,6 +324,33 @@ class SustainDC(gym.Env):
 
         return ci_features
 
+    # --- Observation layout, single source of truth -------------------------
+    # Every agent's state starts with the same prefix:
+    #   t_i[:4]      cos_hour, sin_hour, cos_day, sin_day   (4)
+    #   current_ci                                           (1)
+    #   ci_features  2 slopes + extract_ci_features()'s 5    (7)
+    # and ends with _price_feature_block()'s 3 slots. The per-agent middle
+    # differs. harl/envs/sustaindc/harlsustaindc_env.py picks individual
+    # features out of dc_state/bat_state by POSITION to build the critic's
+    # shared observation, so those positions are published here rather than
+    # hardcoded there -- changing the prefix once silently fed the critic the
+    # wrong feature (normalized peak demand instead of battery SOC).
+    OBS_PREFIX_LEN = 4 + 1 + 7          # time + current_ci + ci_features = 12
+
+    # dc_state middle: current_workload, next_workload, current_out_temp, next_out_temp
+    DC_IDX = {
+        "current_workload": OBS_PREFIX_LEN + 0,
+        "next_workload": OBS_PREFIX_LEN + 1,
+        "current_out_temp": OBS_PREFIX_LEN + 2,
+        "next_out_temp": OBS_PREFIX_LEN + 3,
+    }
+    # bat_state middle: current_workload, current_temperature, battery_soc
+    BAT_IDX = {
+        "current_workload": OBS_PREFIX_LEN + 0,
+        "current_temperature": OBS_PREFIX_LEN + 1,
+        "battery_soc": OBS_PREFIX_LEN + 2,
+    }
+
     def _price_feature_block(self):
         """[current energy price (normalized), progress toward Rate M's
         tier-2 threshold, normalized running peak demand this billing
@@ -336,7 +370,10 @@ class SustainDC(gym.Env):
         Returns:
             np.ndarray: State of the load shifting environment.
         """
-        hour_cos_sin = t_i[:2]
+        # cos_hour, sin_hour, cos_day, sin_day -- season included: HQ's winter
+        # period (Dec 1 - Mar 31) drives the demand ratchet and Rate L's
+        # overrun charge, so the agent must be able to tell the season.
+        time_cos_sin = t_i[:4]
 
         # CI Trend analysis
         trend_smoothing_window = 4
@@ -370,7 +407,7 @@ class SustainDC(gym.Env):
         
         # Combine all features into the state
         ls_state = np.float32(np.hstack((
-                                        hour_cos_sin,
+                                        time_cos_sin,
                                         current_ci,
                                         ci_features,
                                         oldest_task_age,
@@ -382,7 +419,7 @@ class SustainDC(gym.Env):
                                         ls_task_age_histogram,
                                         price_features
                                     )))
-        if len(ls_state) != 29:
+        if len(ls_state) != 31:
             print(f'Error: {len(ls_state)}')
         return ls_state
 
@@ -393,7 +430,10 @@ class SustainDC(gym.Env):
         Returns:
             np.ndarray: State of the data center environment.
         """
-        hour_cos_sin = t_i[:2]
+        # cos_hour, sin_hour, cos_day, sin_day -- season included: HQ's winter
+        # period (Dec 1 - Mar 31) drives the demand ratchet and Rate L's
+        # overrun charge, so the agent must be able to tell the season.
+        time_cos_sin = t_i[:4]
         
         # CI Trend analysis
         trend_smoothing_window = 4
@@ -414,7 +454,7 @@ class SustainDC(gym.Env):
                     ])
 
 
-        dc_state = np.float32(np.hstack((hour_cos_sin,
+        dc_state = np.float32(np.hstack((time_cos_sin,
                                          current_ci,
                                          ci_features,
                                          current_workload,
@@ -434,7 +474,10 @@ class SustainDC(gym.Env):
         Returns:
             np.ndarray: State of the battery environment.
         """
-        hour_cos_sin = t_i[:2]
+        # cos_hour, sin_hour, cos_day, sin_day -- season included: HQ's winter
+        # period (Dec 1 - Mar 31) drives the demand ratchet and Rate L's
+        # overrun charge, so the agent must be able to tell the season.
+        time_cos_sin = t_i[:4]
         
         # CI Trend analysis
         trend_smoothing_window = 4
@@ -455,7 +498,7 @@ class SustainDC(gym.Env):
                     ])
 
 
-        bat_state = np.float32(np.hstack((hour_cos_sin,
+        bat_state = np.float32(np.hstack((time_cos_sin,
                                           current_ci,
                                           ci_features,
                                           current_workload,
@@ -484,7 +527,16 @@ class SustainDC(gym.Env):
         self.ls_reward = self.dc_reward = self.bat_reward = 0
 
         # Reset the managers
-        random_init_day =  random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1])) # self.init_day 
+        if self.sample_whole_year:
+            # Sample the episode's start day from the WHOLE year, so training
+            # visits every season. With the default month-anchored sampling
+            # below, `month: 6` confines every episode to days ~174-218 and
+            # HQ's winter period (Dec 1 - Mar 31) is never reached: the demand
+            # ratchet and Rate L's winter overrun charge become unreachable
+            # code. See utils/price_manager.is_hq_winter_day.
+            random_init_day = random.randint(0, 364)
+        else:
+            random_init_day =  random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1])) # self.init_day 
         random_init_hour = random.randint(0, 23)
         self.current_hour = random_init_hour
         

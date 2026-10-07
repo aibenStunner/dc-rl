@@ -7,17 +7,22 @@ charges, LP cross-checks).
 ## Running
 
 ```bash
-python3 tests/run_all.py                  # whole suite
-python3 tests/run_all.py price            # only modules matching "price"
-python3 tests/test_price_manager.py       # one module directly
+PY=~/.pyenv/versions/3.10.14/envs/thesis-dcrl/bin/python
+
+$PY tests/run_all.py                  # whole suite
+$PY tests/run_all.py price            # only modules matching "price"
+$PY tests/test_price_manager.py       # one module directly
 ```
+
+**Use the `thesis-dcrl` interpreter, not bare `python3`** — bare `python3` is
+pyenv 3.11 and has no `gymnasium`. `test_price_manager.py` happens to work
+either way (numpy only), but `test_observation_layout.py` builds a real
+`SustainDC` and needs the full dependency stack.
 
 No pytest required — it is not a dependency of this repo and is not
 installed in the `thesis-dcrl` env. Tests are plain `test_*` functions
-collected by `tests/_harness.py`, the same standalone-runnable convention
-the thesis's v1/v2a/v2b/v3 models use in their `test_invariance.py` files.
-`pytest tests/` also works if you ever install it (`tests/conftest.py`
-handles the import path).
+collected by `tests/_harness.py`. `pytest tests/` also works if you ever
+install it (`tests/conftest.py` handles the import path).
 
 ## Adding a test module
 
@@ -58,4 +63,5 @@ Conventions worth keeping:
 
 | Module | Covers |
 |---|---|
-| `test_price_manager.py` | `utils/price_manager.py` — Rate M two-tier energy + demand charge, Rate L flat energy + winter optimization charge, capacity-based rate auto-selection, running-peak demand ratchet, HQ winter calendar |
+| `test_price_manager.py` | `utils/price_manager.py` — Rate M two-tier energy + demand charge, Rate L flat energy + winter optimization charge, capacity-based rate auto-selection, running-peak demand ratchet, Rate M's 65% winter ratchet, HQ winter calendar |
+| `test_observation_layout.py` | The observation contract — declared Box widths vs what the builders emit, the shared time/CI prefix, season features, and `SustainDC.DC_IDX`/`BAT_IDX`, which `harlsustaindc_env.py` consumes **positionally** to build the critic's shared observation (a stale index there fails silently, not loudly) |
