@@ -140,6 +140,12 @@ while True:
                         key: eval_infos[i][j].get(key, None) for key in [
                             'bat_action', 'bat_SOC', 'bat_CO2_footprint', 'bat_avg_CI', 'bat_total_energy_without_battery_KWh',
                             'bat_total_energy_with_battery_KWh', 'bat_max_bat_cap',
+                            'bat_charge_bus_KWh', 'bat_discharge_bus_KWh',
+                            'bat_charge_cell_KWh', 'bat_discharge_cell_KWh',
+                            'bat_cell_throughput_KWh', 'bat_cumulative_cell_throughput_KWh',
+                            'bat_degradation_cost_c', 'bat_cumulative_degradation_cost_c',
+                            'bat_round_trip_efficiency', 'bat_charge_efficiency',
+                            'bat_discharge_efficiency',
                             'bat_dcload_min', 'bat_dcload_max',
                         ]
                     })

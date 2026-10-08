@@ -3,6 +3,7 @@ import sys
 import random
 import datetime
 import copy
+import copy
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -76,6 +77,13 @@ class EnvConfig(dict):
         
         # Maximum battery capacity
         'max_bat_cap_Mw': 2,
+
+        # Reduced-form battery physics. Degradation is reported in bat_info
+        # but intentionally excluded from tariff cost and reward tuning.
+        'battery': {
+            'round_trip_efficiency': 0.90,
+            'degradation_cost_c_per_kwh': 5.78,
+        },
         
         # Data center configuration file
         'dc_config_file': 'dc_config.json',
@@ -109,9 +117,19 @@ class EnvConfig(dict):
             )
         dict.__init__(self, copy.deepcopy(self.DEFAULT_CONFIG))
 
-        # Override defaults with the passed config
+        # Override defaults with the passed config. Nested battery options
+        # merge onto their defaults so callers may override one parameter
+        # without accidentally dropping the other physical assumption.
         for key, val in raw_config.items():
-            self[key] = val
+            if key == "battery":
+                if not isinstance(val, dict):
+                    raise ValueError("battery must be a mapping")
+                unknown = set(val) - set(self["battery"])
+                if unknown:
+                    raise ValueError(f"battery.{min(unknown, key=repr)} is unknown")
+                self["battery"].update(val)
+            else:
+                self[key] = val
 
 
 class SustainDC(gym.Env):
@@ -139,6 +157,7 @@ class SustainDC(gym.Env):
         self.workload_file = env_config['workload_file']
         
         self.max_bat_cap_Mw = env_config['max_bat_cap_Mw']
+        self.battery_config = env_config['battery']
         self.indv_reward = env_config['individual_reward_weight']
         self.collab_reward = (1 - self.indv_reward) / 2
         
@@ -185,7 +204,9 @@ class SustainDC(gym.Env):
                                         max_dc_pw_MW=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][1] / 1e6, 
                                         dcload_max=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][1],
                                         dcload_min=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][0],
-                                        n_fwd_steps=n_vars_ci)
+                                        n_fwd_steps=n_vars_ci,
+                                        round_trip_efficiency=self.battery_config['round_trip_efficiency'],
+                                        degradation_cost_c_per_kwh=self.battery_config['degradation_cost_c_per_kwh'])
 
         self.bat_env.dcload_max = self.dc_env.power_ub_kW / 4  # Assuming 15 minutes timestep. Kwh
         

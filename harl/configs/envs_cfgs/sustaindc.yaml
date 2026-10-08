@@ -9,6 +9,10 @@ location: montreal
 cintensity_file: "QC_NG_&_avgCI.csv"
 workload_file: "Alibaba_CPU_Data_Hourly_1.csv"
 max_bat_cap_Mw: 1.0
+# Reduced-form BESS physics. Degradation is report-only in this phase.
+battery:
+  round_trip_efficiency: 0.90
+  degradation_cost_c_per_kwh: 5.78
 individual_reward_weight: 0.8
 flexible_load: 0.6
 ls_reward: default_ls_reward
