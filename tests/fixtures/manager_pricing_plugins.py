@@ -5,7 +5,7 @@ from typing import Mapping
 
 import numpy as np
 
-from utils.pricing.contracts import (
+from utils.managers.pricing.contracts import (
     MeterReading,
     PricingCharges,
     PricingClock,

@@ -85,7 +85,7 @@ No plug-in directory scanning or dynamic registration is used. Import paths are 
 ## 5. Package layout
 
 ```text
-utils/pricing/
+utils/managers/pricing/
 ├── __init__.py              public API only
 ├── contracts.py             dataclasses and PricingModel protocol
 ├── loader.py                config-file loading, validation, registry/import-path resolution
@@ -104,7 +104,7 @@ data/Pricing/
 └── time_series_example.yaml
 ```
 
-The existing `utils/price_manager.py` is removed after imports are migrated. There is one implementation of `PriceManager`, in `utils/pricing/manager.py`.
+The existing `utils/price_manager.py` is removed after imports are migrated. There is one implementation of `PriceManager`, in `utils/managers/pricing/manager.py`.
 
 ## 6. Core contracts
 

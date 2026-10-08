@@ -13,15 +13,15 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tests._harness import run_module_tests
-from utils.pricing.contracts import (
+from utils.managers.pricing.contracts import (
     MeterReading,
     PricingCharges,
     PricingClock,
     PricingContext,
     PricingState,
 )
-from utils.pricing.loader import PricingConfigError, create_pricing_model, load_pricing_config
-from utils.pricing.models.flat import FlatPricingModel
+from utils.managers.pricing.loader import PricingConfigError, create_pricing_model, load_pricing_config
+from utils.managers.pricing.models.flat import FlatPricingModel
 
 
 def _context(future_steps=8):

@@ -10,8 +10,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tests._harness import run_module_tests
-from utils.pricing.loader import PricingConfig, load_pricing_config
-from utils.pricing.manager import PriceManager
+from utils.managers.pricing.loader import PricingConfig, load_pricing_config
+from utils.managers.pricing.manager import PriceManager
 
 
 _HYDRO_CONFIG = _REPO_ROOT / "data" / "Pricing" / "hydro_quebec_2026.yaml"

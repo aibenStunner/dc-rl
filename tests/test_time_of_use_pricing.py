@@ -11,13 +11,13 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tests._harness import run_module_tests
-from utils.pricing.contracts import (
+from utils.managers.pricing.contracts import (
     MeterReading,
     PricingClock,
     PricingContext,
     PricingState,
 )
-from utils.pricing.models.time_of_use import TimeOfUsePricingModel
+from utils.managers.pricing.models.time_of_use import TimeOfUsePricingModel
 
 
 HOURLY_PRICES = [float(index + 1) for index in range(24)]

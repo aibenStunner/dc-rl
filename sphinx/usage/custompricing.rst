@@ -158,7 +158,7 @@ A custom model can be loaded without modifying the repository:
      options:
        account: research_site
 
-The class must implement ``PricingModel`` from ``utils.pricing.contracts``:
+The class must implement ``PricingModel`` from ``utils.managers.pricing.contracts``:
 
 .. code-block:: python
 

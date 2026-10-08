@@ -12,19 +12,19 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tests._harness import run_module_tests
-from utils.pricing.contracts import (
+from utils.managers.pricing.contracts import (
     MeterReading,
     PricingClock,
     PricingContext,
     PricingState,
 )
-from utils.pricing.loader import (
+from utils.managers.pricing.loader import (
     PricingConfigError,
     create_pricing_model,
     load_pricing_config,
 )
-from utils.pricing.manager import PriceManager
-from utils.pricing.models.hydro_quebec import HydroQuebecPricingModel
+from utils.managers.pricing.manager import PriceManager
+from utils.managers.pricing.models.hydro_quebec import HydroQuebecPricingModel
 
 
 _CONFIG_FILE = _REPO_ROOT / "data" / "Pricing" / "hydro_quebec_2026.yaml"
@@ -99,7 +99,9 @@ def test_yaml_contains_cited_hydro_quebec_figures():
     )
     assert config.parameters["rates"]["rate_l"]["optimization_overrun_fraction"] == 1.10
     assert config.parameters["metadata"]["effective_date"] == "2026-04-01"
-    assert config.parameters["metadata"]["source"] == "hq-electricity-rates.pdf"
+    assert config.parameters["metadata"]["source"] == (
+        "https://www.hydroquebec.com/data/documents-donnees/pdf/electricity-rates.pdf"
+    )
 
 
 def test_loader_rejects_invalid_rate_l_overrun_fraction_with_field_error():

@@ -19,9 +19,9 @@ from utils.make_envs_pyenv import (make_bat_fwd_env, make_dc_pyeplus_env,
                                    make_ls_env)
 from utils.managers import (CI_Manager, Time_Manager, Weather_Manager,
                             Workload_Manager)
-from utils.pricing.contracts import PricingCharges
-from utils.pricing.loader import load_pricing_config
-from utils.pricing.manager import PriceManager
+from utils.managers.pricing.contracts import PricingCharges
+from utils.managers.pricing.loader import load_pricing_config
+from utils.managers.pricing.manager import PriceManager
 from utils.utils_cf import get_energy_variables, get_init_day, obtain_paths
 
 _REPO_ROOT = Path(__file__).resolve().parent

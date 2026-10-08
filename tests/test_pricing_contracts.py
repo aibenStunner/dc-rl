@@ -13,7 +13,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tests._harness import run_module_tests
-from utils.pricing.contracts import (
+from utils.managers.pricing.contracts import (
     MeterReading, PricingCharges, PricingClock, PricingContext,
     PricingModel, PricingObservation, PricingState,
 )

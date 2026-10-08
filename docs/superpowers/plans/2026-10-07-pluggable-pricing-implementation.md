@@ -38,15 +38,15 @@
 
 **Create**
 
-- `utils/pricing/__init__.py` — public pricing API and compatibility-free imports.
-- `utils/pricing/contracts.py` — protocol and standardized dataclasses.
-- `utils/pricing/loader.py` — strict config/YAML validation and built-in/import-path model resolution.
-- `utils/pricing/manager.py` — model-neutral `PriceManager` lifecycle and getters.
-- `utils/pricing/models/__init__.py` — built-in registry only.
-- `utils/pricing/models/flat.py` — energy-only flat model.
-- `utils/pricing/models/time_of_use.py` — cyclic 24-hour schedule model.
-- `utils/pricing/models/time_series.py` — CSV-backed exogenous series model.
-- `utils/pricing/models/hydro_quebec.py` — Rate M, Rate L, proposed data-centre scenario.
+- `utils/managers/pricing/__init__.py` — public pricing API and compatibility-free imports.
+- `utils/managers/pricing/contracts.py` — protocol and standardized dataclasses.
+- `utils/managers/pricing/loader.py` — strict config/YAML validation and built-in/import-path model resolution.
+- `utils/managers/pricing/manager.py` — model-neutral `PriceManager` lifecycle and getters.
+- `utils/managers/pricing/models/__init__.py` — built-in registry only.
+- `utils/managers/pricing/models/flat.py` — energy-only flat model.
+- `utils/managers/pricing/models/time_of_use.py` — cyclic 24-hour schedule model.
+- `utils/managers/pricing/models/time_series.py` — CSV-backed exogenous series model.
+- `utils/managers/pricing/models/hydro_quebec.py` — Rate M, Rate L, proposed data-centre scenario.
 - `data/Pricing/hydro_quebec_2026.yaml` — official/cited rate parameters and pending-scenario metadata.
 - `data/Pricing/flat_example.yaml` — runnable flat example.
 - `data/Pricing/time_of_use_example.yaml` — runnable 24-hour schedule example.
@@ -74,7 +74,7 @@
 
 **Delete after all imports/tests migrate**
 
-- `utils/price_manager.py` — replaced by `utils/pricing/` package.
+- `utils/price_manager.py` — replaced by `utils/managers/pricing/` package.
 - `tests/test_price_manager.py` — split into focused model/loader tests.
 
 ---
@@ -82,8 +82,8 @@
 ### Task 1: Define the Model-Neutral Pricing Contracts
 
 **Files:**
-- Create: `utils/pricing/__init__.py`
-- Create: `utils/pricing/contracts.py`
+- Create: `utils/managers/pricing/__init__.py`
+- Create: `utils/managers/pricing/contracts.py`
 - Create: `tests/test_pricing_contracts.py`
 
 **Interfaces:**
@@ -106,7 +106,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tests._harness import run_module_tests
-from utils.pricing.contracts import (
+from utils.managers.pricing.contracts import (
     MeterReading, PricingCharges, PricingClock, PricingContext,
     PricingModel, PricingObservation, PricingState,
 )
@@ -152,11 +152,11 @@ PY=~/.pyenv/versions/3.10.14/envs/thesis-dcrl/bin/python
 $PY tests/test_pricing_contracts.py
 ```
 
-Expected: FAIL because `utils.pricing.contracts` does not exist.
+Expected: FAIL because `utils.managers.pricing.contracts` does not exist.
 
 - [ ] **Step 3: Implement the contracts**
 
-Create `utils/pricing/contracts.py` with these exact public signatures:
+Create `utils/managers/pricing/contracts.py` with these exact public signatures:
 
 ```python
 from __future__ import annotations
@@ -217,7 +217,7 @@ class PricingModel(Protocol):
     def export_carry_state(self, state: PricingState) -> Mapping[str, object]: ...
 ```
 
-Export these names from `utils/pricing/__init__.py`.
+Export these names from `utils/managers/pricing/__init__.py`.
 
 - [ ] **Step 4: Run contract tests**
 
@@ -228,7 +228,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add utils/pricing/__init__.py utils/pricing/contracts.py tests/test_pricing_contracts.py
+git add utils/managers/pricing/__init__.py utils/managers/pricing/contracts.py tests/test_pricing_contracts.py
 git commit -m "feat: define pricing model contracts"
 ```
 
@@ -237,8 +237,8 @@ git commit -m "feat: define pricing model contracts"
 ### Task 2: Implement Strict Config Loading and Plug-In Resolution
 
 **Files:**
-- Create: `utils/pricing/loader.py`
-- Create: `utils/pricing/models/__init__.py`
+- Create: `utils/managers/pricing/loader.py`
+- Create: `utils/managers/pricing/models/__init__.py`
 - Create: `tests/test_pricing_loader.py`
 - Create: `tests/fixtures/custom_pricing_plugin.py`
 
@@ -252,7 +252,7 @@ Create fixtures:
 
 ```python
 # tests/fixtures/custom_pricing_plugin.py
-from utils.pricing.contracts import PricingCharges, PricingObservation
+from utils.managers.pricing.contracts import PricingCharges, PricingObservation
 import numpy as np
 
 class ValidPlugin:
@@ -327,7 +327,7 @@ class PricingConfigError(ValueError):
 
 - [ ] **Step 4: Implement built-in and import-path resolution**
 
-Create `utils/pricing/models/flat.py` now with the minimal real built-in required to prove registry resolution end-to-end:
+Create `utils/managers/pricing/models/flat.py` now with the minimal real built-in required to prove registry resolution end-to-end:
 
 ```python
 class FlatPricingModel:
@@ -365,7 +365,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add utils/pricing/loader.py utils/pricing/models/__init__.py \
+git add utils/managers/pricing/loader.py utils/managers/pricing/models/__init__.py \
   tests/test_pricing_loader.py tests/fixtures/custom_pricing_plugin.py
 git commit -m "feat: load pricing models from config or import path"
 ```
@@ -375,10 +375,10 @@ git commit -m "feat: load pricing models from config or import path"
 ### Task 3: Add Flat, TOU, and Time-Series Built-ins
 
 **Files:**
-- Modify: `utils/pricing/models/flat.py`
-- Create: `utils/pricing/models/time_of_use.py`
-- Create: `utils/pricing/models/time_series.py`
-- Modify: `utils/pricing/models/__init__.py`
+- Modify: `utils/managers/pricing/models/flat.py`
+- Create: `utils/managers/pricing/models/time_of_use.py`
+- Create: `utils/managers/pricing/models/time_series.py`
+- Modify: `utils/managers/pricing/models/__init__.py`
 - Create: `data/Pricing/flat_example.yaml`
 - Create: `data/Pricing/time_of_use_example.yaml`
 - Create: `data/Pricing/time_series_example.yaml`
@@ -515,7 +515,7 @@ Expected: all PASS.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add utils/pricing/models data/Pricing tests/test_flat_pricing.py \
+git add utils/managers/pricing/models data/Pricing tests/test_flat_pricing.py \
   tests/test_time_of_use_pricing.py tests/test_time_series_pricing.py
 git commit -m "feat: add reusable pricing model builtins"
 ```
@@ -525,9 +525,9 @@ git commit -m "feat: add reusable pricing model builtins"
 ### Task 4: Extract Hydro-Québec Logic and Parameters
 
 **Files:**
-- Create: `utils/pricing/models/hydro_quebec.py`
+- Create: `utils/managers/pricing/models/hydro_quebec.py`
 - Create: `data/Pricing/hydro_quebec_2026.yaml`
-- Modify: `utils/pricing/models/__init__.py`
+- Modify: `utils/managers/pricing/models/__init__.py`
 - Create: `tests/test_hydro_quebec_pricing.py`
 - Modify: `tests/test_pricing_loader.py`
 
@@ -644,8 +644,8 @@ Expected: PASS, including old/new parity.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add utils/pricing/models/hydro_quebec.py \
-  utils/pricing/models/__init__.py data/Pricing/hydro_quebec_2026.yaml \
+git add utils/managers/pricing/models/hydro_quebec.py \
+  utils/managers/pricing/models/__init__.py data/Pricing/hydro_quebec_2026.yaml \
   tests/test_hydro_quebec_pricing.py tests/test_pricing_loader.py
 git commit -m "feat: add Hydro-Quebec pricing plugin"
 ```
@@ -655,8 +655,8 @@ git commit -m "feat: add Hydro-Quebec pricing plugin"
 ### Task 5: Implement the Model-Neutral PriceManager
 
 **Files:**
-- Create: `utils/pricing/manager.py`
-- Modify: `utils/pricing/__init__.py`
+- Create: `utils/managers/pricing/manager.py`
+- Modify: `utils/managers/pricing/__init__.py`
 - Create: `tests/test_pricing_manager.py`
 
 **Interfaces:**
@@ -727,7 +727,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add utils/pricing/manager.py utils/pricing/__init__.py tests/test_pricing_manager.py
+git add utils/managers/pricing/manager.py utils/managers/pricing/__init__.py tests/test_pricing_manager.py
 git commit -m "feat: orchestrate pluggable pricing models"
 ```
 
@@ -902,7 +902,7 @@ rm utils/price_manager.py tests/test_price_manager.py
 Run:
 
 ```bash
-$PY -c "from utils.pricing import PriceManager; import sustaindc_env"
+$PY -c "from utils.managers.pricing import PriceManager; import sustaindc_env"
 $PY tests/run_all.py
 ```
 
@@ -911,7 +911,7 @@ Expected: PASS, no old-module import errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add -A utils/price_manager.py tests/test_price_manager.py utils/pricing tests
+git add -A utils/price_manager.py tests/test_price_manager.py utils/managers/pricing tests
 git commit -m "refactor: remove monolithic pricing module"
 ```
 
@@ -968,7 +968,7 @@ Describe the nested `pricing:` config, built-in names, import-path plug-ins, par
 Run a script that parses every YAML snippet/file mentioned by docs and calls `load_pricing_config` for each runnable example. Run:
 
 ```bash
-$PY -m compileall utils/pricing tests
+$PY -m compileall utils/managers/pricing tests
 $PY tests/run_all.py
 ```
 
@@ -1001,7 +1001,7 @@ In the parent repo, commit `CLAUDE.md` separately after the submodule pointer is
 
 ```bash
 PY=~/.pyenv/versions/3.10.14/envs/thesis-dcrl/bin/python
-$PY -m compileall utils/pricing sustaindc_env.py utils/reward_creator.py tests
+$PY -m compileall utils/managers/pricing sustaindc_env.py utils/reward_creator.py tests
 $PY tests/run_all.py
 ```
 
@@ -1035,7 +1035,7 @@ Expected: exit 0, no traceback.
 ```bash
 git diff --check
 grep -RInE '\bv1\b|\bv2a?\b|\bv2b\b|\bv3\b' \
-  --include='*.py' --include='*.md' --include='*.rst' utils/pricing tests sphinx/usage
+  --include='*.py' --include='*.md' --include='*.rst' utils/managers/pricing tests sphinx/usage
 ```
 
 Expected: no implementation-docstring references to earlier simulator versions; unrelated external version strings are reviewed manually.

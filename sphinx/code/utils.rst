@@ -52,13 +52,37 @@ utils.make\_envs\_pyenv module
    :undoc-members:
    :show-inheritance:
 
-utils.managers module
----------------------
+utils.managers package
+----------------------
 
 .. automodule:: utils.managers
    :members:
    :undoc-members:
    :show-inheritance:
+
+utils.managers.time\_manager module
+------------------------------------
+
+.. automodule:: utils.managers.time_manager
+   :members:
+
+utils.managers.workload\_manager module
+----------------------------------------
+
+.. automodule:: utils.managers.workload_manager
+   :members:
+
+utils.managers.carbon\_intensity\_manager module
+--------------------------------------------------
+
+.. automodule:: utils.managers.carbon_intensity_manager
+   :members:
+
+utils.managers.weather\_manager module
+---------------------------------------
+
+.. automodule:: utils.managers.weather_manager
+   :members:
 
 utils.rbc\_agents module
 ------------------------
