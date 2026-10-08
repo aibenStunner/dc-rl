@@ -160,6 +160,11 @@ class SustainDC(gym.Env):
         self._agent_ids = set(self.agents)
 
         ci_loc, wea_loc = obtain_paths(self.location)
+        # An explicit carbon-intensity file selects a custom profile while
+        # preserving the location-derived weather file. 
+        # CI_Manager uses its filename only when location is empty.
+        if self.ci_file:
+            ci_loc = ""
         
         ls_reward_method = 'default_ls_reward' if not 'ls_reward' in env_config.keys() else env_config['ls_reward']
         self.ls_reward_method = reward_creator.get_reward_method(ls_reward_method)

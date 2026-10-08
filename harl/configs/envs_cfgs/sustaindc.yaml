@@ -3,7 +3,8 @@ agents:
   - agent_dc
   - agent_bat
 location: ca
-workload_file: 'Alibaba_CPU_Data_Hourly_1.csv'
+cintensity_file: "QC_NG_&_avgCI.csv"
+workload_file: "Alibaba_CPU_Data_Hourly_1.csv"
 max_bat_cap_Mw: 1.0
 individual_reward_weight: 0.8
 flexible_load: 0.6
@@ -26,7 +27,7 @@ pricing:
 # window around `month`. Must be True for the Hydro-Quebec winter period to
 # be reached at all -- with month: 6 every episode sits in July.
 sample_whole_year: True
-dc_config_file: 'dc_config.json'
+dc_config_file: "dc_config.json"
 month: 6
 days_per_episode: 30
 partial_obs: True
