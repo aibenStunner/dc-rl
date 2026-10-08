@@ -104,6 +104,7 @@ class EnvConfig(dict):
         'battery': {
             'round_trip_efficiency': 0.90,
             'degradation_cost_c_per_kwh': 5.78,
+            'initial_soc': 0.0,
         },
         
         # Data center configuration file
@@ -111,10 +112,20 @@ class EnvConfig(dict):
         
         # weight of the individual reward (1=full individual, 0=full collaborative, default=0.8)
         'individual_reward_weight': 0.8,
-        
+
         # flexible load ratio of the total workload
         'flexible_load': 0.1,
-        
+
+        # Structured reward modes leave the legacy callable selection intact.
+        'reward': {
+            'mode': 'legacy',
+        },
+
+        # Legacy resets retain their random start policy. Experiment 1 uses a
+        # valid midnight start so every independent billing episode fits the
+        # annual source trace.
+        'episode_start_policy': 'legacy_random',
+
         # Specify reward methods. These are defined in utils/reward_creator.
         'ls_reward': 'default_ls_reward',
         'dc_reward': 'default_dc_reward',
@@ -142,15 +153,65 @@ class EnvConfig(dict):
         # merge onto their defaults so callers may override one parameter
         # without accidentally dropping the other physical assumption.
         for key, val in raw_config.items():
-            if key in {"battery", "weather", "pv"}:
+            if key in {"battery", "weather", "pv", "reward"}:
                 if not isinstance(val, dict):
                     raise ValueError(f"{key} must be a mapping")
+                if key == "reward" and val.get("mode") == "team_tariff_targeted_safeguards":
+                    self[key] = _targeted_reward_defaults()
                 unknown = set(val) - set(self[key])
                 if unknown:
                     raise ValueError(f"{key}.{min(unknown, key=repr)} is unknown")
                 self[key].update(val)
             else:
                 self[key] = val
+        _validate_env_config(self)
+
+
+def _targeted_reward_defaults():
+    return {
+        "mode": "team_tariff_targeted_safeguards",
+        "scale": 0.01,
+        "degradation_cost_weight": 0.0,
+        "ls_overdue_penalty_weight": 0.50,
+        "ls_dropped_penalty_weight": 0.25,
+        "ls_backlog_penalty_weight": 0.20,
+        "dc_thermal_penalty_weight": 0.75,
+        "dc_constraint_penalty_weight": 0.40,
+    }
+
+
+def _validate_env_config(config):
+    mode = config["reward"]["mode"]
+    if mode not in {"legacy", "team_tariff_targeted_safeguards"}:
+        raise ValueError(f"reward.mode {mode!r} is unsupported")
+    if config["episode_start_policy"] not in {"legacy_random", "valid_midnight"}:
+        raise ValueError("episode_start_policy must be legacy_random or valid_midnight")
+    _validate_fraction(config["flexible_load"], "flexible_load", upper_exclusive=0.9)
+    if mode == "team_tariff_targeted_safeguards":
+        if config["agents"] != ["agent_ls", "agent_dc", "agent_bat"]:
+            raise ValueError(
+                "team_tariff_targeted_safeguards requires agents in LS, DC, battery order"
+            )
+        if config["episode_start_policy"] != "valid_midnight":
+            raise ValueError(
+                "team_tariff_targeted_safeguards requires episode_start_policy: valid_midnight"
+            )
+        for key, value in config["reward"].items():
+            if key == "mode":
+                continue
+            if not np.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"reward.{key} must be finite and non-negative")
+        if config["reward"]["scale"] == 0.0:
+            raise ValueError("reward.scale must be positive")
+        if config["reward"]["degradation_cost_weight"] != 0.0:
+            raise ValueError(
+                "team_tariff_targeted_safeguards requires degradation_cost_weight: 0.0"
+            )
+
+
+def _validate_fraction(value, name, upper_exclusive):
+    if isinstance(value, bool) or not np.isfinite(float(value)) or not 0.0 <= float(value) < upper_exclusive:
+        raise ValueError(f"{name} must be finite in [0, {upper_exclusive})")
 
 
 class SustainDC(gym.Env):
@@ -179,6 +240,8 @@ class SustainDC(gym.Env):
         
         self.max_bat_cap_Mw = env_config['max_bat_cap_Mw']
         self.battery_config = env_config['battery']
+        self.reward_config = env_config['reward']
+        self.episode_start_policy = env_config['episode_start_policy']
         self.indv_reward = env_config['individual_reward_weight']
         self.collab_reward = (1 - self.indv_reward) / 2
         
@@ -220,8 +283,10 @@ class SustainDC(gym.Env):
         n_vars_energy, n_vars_battery = 0, 0  # For partial observability (for p.o.)
         self.n_vars_ci = 8
         n_vars_ci = self.n_vars_ci
-        self.ls_env = make_ls_env(month=self.month, test_mode=self.evaluation_mode, n_vars_ci=n_vars_ci, 
-                                  n_vars_energy=n_vars_energy, n_vars_battery=n_vars_battery, queue_max_len=1000)
+        self.ls_env = make_ls_env(month=self.month, test_mode=self.evaluation_mode, n_vars_ci=n_vars_ci,
+                                  n_vars_energy=n_vars_energy, n_vars_battery=n_vars_battery,
+                                  queue_max_len=1000,
+                                  flexible_workload_ratio=self.flexible_load)
         self.dc_env, _ = make_dc_pyeplus_env(month=self.month + 1, location=ci_loc, max_bat_cap_Mw=self.max_bat_cap_Mw, use_ls_cpu_load=True, 
                                              datacenter_capacity_mw=self.datacenter_capacity_mw, dc_config_file=self.dc_config_file, add_cpu_usage=False)
         self.bat_env = make_bat_fwd_env(month=self.month, max_bat_cap_Mwh=self.dc_env.ranges['max_battery_energy_Mwh'], 
@@ -230,7 +295,8 @@ class SustainDC(gym.Env):
                                         dcload_min=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][0],
                                         n_fwd_steps=n_vars_ci,
                                         round_trip_efficiency=self.battery_config['round_trip_efficiency'],
-                                        degradation_cost_c_per_kwh=self.battery_config['degradation_cost_c_per_kwh'])
+                                        degradation_cost_c_per_kwh=self.battery_config['degradation_cost_c_per_kwh'],
+                                        initial_soc=self.battery_config['initial_soc'])
 
         self.bat_env.dcload_max = self.dc_env.power_ub_kW / 4  # Assuming 15 minutes timestep. Kwh
         
@@ -602,17 +668,19 @@ class SustainDC(gym.Env):
         self.ls_truncated = self.dc_truncated = self.bat_truncated = False
         self.ls_reward = self.dc_reward = self.bat_reward = 0
 
-        # Reset the managers
-        if self.sample_whole_year:
-            # Sample the episode's start day from the WHOLE year, so training
-            # visits every season. With the default month-anchored sampling
-            # below, `month: 6` confines every episode to days ~174-218 and
-            # Hydro-Quebec's winter period (Dec 1 - Mar 31) is never reached:
-            # the demand ratchet and winter overrun charge become unreachable.
+        # Reset the managers. Ordinary resets intentionally start independent
+        # billing episodes; price state is never implicitly carried.
+        if self.episode_start_policy == "valid_midnight":
+            random_init_day = random.randint(0, 365 - self.days_per_episode)
+            random_init_hour = 0
+        elif self.sample_whole_year:
+            # Sample the episode's start day from the whole year for legacy
+            # configurations, which retain their existing source-wrap behavior.
             random_init_day = random.randint(0, 364)
+            random_init_hour = random.randint(0, 23)
         else:
-            random_init_day =  random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1])) # self.init_day 
-        random_init_hour = random.randint(0, 23)
+            random_init_day = random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1]))
+            random_init_hour = random.randint(0, 23)
         self.current_hour = random_init_hour
         
         t_i = self.t_m.reset(init_day=random_init_day, init_hour=random_init_hour)
@@ -634,7 +702,9 @@ class SustainDC(gym.Env):
         ls_s, self.ls_info = self.ls_env.reset()
         self.dc_state, self.dc_info = self.dc_env.reset()
         bat_s, self.bat_info = self.bat_env.reset()
-                
+        self._episode_start_soc = self.bat_env.get_battery_soc()
+        self._terminal_soc_settled = False
+
         current_workload = self.workload_m.get_current_workload()
         next_workload = self.workload_m.get_next_workload()
         
@@ -776,9 +846,10 @@ class SustainDC(gym.Env):
         settlement = self.price_m.settle_pending_period() if terminal else PricingCharges(0.0, 0.0, 0.0)
 
         # Calculate rewards for all agents based on the updated state
+        terminal_soc_settlement = self._terminal_soc_settlement(terminal)
         reward_params = self._calculate_reward_params(
             workload, temp, ci_i, ci_i_future, day, hour, terminal,
-            step_charges, settlement,
+            step_charges, settlement, terminal_soc_settlement,
         )
         self.ls_reward, self.dc_reward, self.bat_reward = self.calculate_reward(reward_params)
 
@@ -868,9 +939,44 @@ class SustainDC(gym.Env):
         return obs
 
 
+    def _terminal_soc_settlement(self, terminal):
+        if self.reward_config["mode"] != "team_tariff_targeted_safeguards":
+            return {
+                "bat_terminal_soc_penalty_component": 0.0,
+                "bat_terminal_soc_start": self._episode_start_soc,
+                "bat_terminal_soc_end": self.bat_env.get_battery_soc(),
+                "bat_terminal_soc_restore_grid_kwh": 0.0,
+                "bat_terminal_soc_reference_price_c_per_kwh": 0.0,
+            }
+        if not terminal or self._terminal_soc_settled:
+            return {
+                "bat_terminal_soc_penalty_component": 0.0,
+                "bat_terminal_soc_start": self._episode_start_soc,
+                "bat_terminal_soc_end": self.bat_env.get_battery_soc(),
+                "bat_terminal_soc_restore_grid_kwh": 0.0,
+                "bat_terminal_soc_reference_price_c_per_kwh": 0.0,
+            }
+        self._terminal_soc_settled = True
+        terminal_soc = self.bat_env.get_battery_soc()
+        soc_deficit = max(0.0, self._episode_start_soc - terminal_soc)
+        restore_grid_kwh = (
+            soc_deficit * self.bat_env.max_bat_cap * 1000.0
+            / self.bat_env.battery.eff_c
+        )
+        terminal_price = self.price_m.get_current_price_denorm()
+        penalty = self.reward_config["scale"] * restore_grid_kwh * terminal_price
+        return {
+            "bat_terminal_soc_penalty_component": penalty,
+            "bat_terminal_soc_start": self._episode_start_soc,
+            "bat_terminal_soc_end": terminal_soc,
+            "bat_terminal_soc_restore_grid_kwh": restore_grid_kwh,
+            "bat_terminal_soc_reference_price_c_per_kwh": terminal_price,
+        }
+
     def _calculate_reward_params(
         self, workload, temp, ci_i, ci_i_future, day, hour, terminal,
         step_charges=None, settlement=PricingCharges(0.0, 0.0, 0.0),
+        terminal_soc_settlement=None,
     ):
         """Create the parameters needed to calculate rewards."""
         if step_charges is None:
@@ -883,8 +989,10 @@ class SustainDC(gym.Env):
         demand_cost = step_charges.demand_cost_increment_c + settlement.demand_cost_increment_c
         additional_cost = step_charges.additional_cost_increment_c + settlement.additional_cost_increment_c
         total_cost = energy_cost + demand_cost + additional_cost
+        if terminal_soc_settlement is None:
+            terminal_soc_settlement = self._terminal_soc_settlement(False)
         return {
-            **self.bat_info, **self.ls_info, **self.dc_info,
+            **self.bat_info, **self.ls_info, **self.dc_info, **terminal_soc_settlement,
             "outside_temp": temp, "day": day, "hour": hour,
             "norm_CI": ci_i_future[0], "forecast_CI": ci_i_future,
             "isterminal": terminal,
@@ -944,6 +1052,22 @@ class SustainDC(gym.Env):
             dc_reward (float): Individual reward for the data center agent.
             bat_reward (float): Individual reward for the battery agent.
         """
+
+        if self.reward_config["mode"] == "team_tariff_targeted_safeguards":
+            rewards, components = reward_creator.team_tariff_targeted_safeguards(
+                params, self.reward_config
+            )
+            params.update(components)
+            params.update({
+                "agent_ls_reward": rewards["agent_ls"],
+                "agent_dc_reward": rewards["agent_dc"],
+                "agent_bat_reward": rewards["agent_bat"],
+            })
+            return (
+                rewards["agent_ls"],
+                rewards["agent_dc"],
+                rewards["agent_bat"],
+            )
 
         ls_reward = self.ls_reward_method(params)
         dc_reward = self.dc_reward_method(params)

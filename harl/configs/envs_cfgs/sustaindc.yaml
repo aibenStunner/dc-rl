@@ -30,11 +30,23 @@ max_bat_cap_Mw: 1.0
 battery:
   round_trip_efficiency: 0.90
   degradation_cost_c_per_kwh: 5.78
-individual_reward_weight: 0.8
+  initial_soc: 0.5
+# Experiment 1 uses separate targeted returns, so HAPPO must preserve all
+# three reward columns through the FP critic path.
+state_type: FP
 flexible_load: 0.6
-ls_reward: default_ls_reward
-dc_reward: default_dc_reward
-bat_reward: default_price_reward
+# Training and initial evaluation are independent 30-day episodes, not a
+# contiguous utility-bill reconstruction.
+episode_start_policy: valid_midnight
+reward:
+  mode: team_tariff_targeted_safeguards
+  scale: 0.01
+  degradation_cost_weight: 0.0
+  ls_overdue_penalty_weight: 0.50
+  ls_dropped_penalty_weight: 0.25
+  ls_backlog_penalty_weight: 0.20
+  dc_thermal_penalty_weight: 0.75
+  dc_constraint_penalty_weight: 0.40
 
 # Capacity (MW) of the datacenter -- also drives Hydro-Quebec tariff
 # auto-selection (Rate M below 5,000 kW / 5 MW, Rate L at/above).

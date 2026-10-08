@@ -140,6 +140,106 @@ def default_price_reward(params: dict) -> float:
     return -0.01 * params["total_price_cost_this_step_c"]
 
 
+def team_tariff_targeted_safeguards(
+    params: dict, reward_config: dict
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Build Experiment 1's shared tariff and targeted safeguards."""
+    required_params = (
+        "total_price_cost_this_step_c",
+        "ls_overdue_penalty",
+        "ls_tasks_dropped",
+        "ls_norm_tasks_in_queue",
+        "dc_int_temperature",
+        "dc_thermal_limit_c",
+        "dc_constraint_violation",
+        "bat_terminal_soc_penalty_component",
+        "bat_degradation_cost_c",
+    )
+    required_config = (
+        "scale",
+        "degradation_cost_weight",
+        "ls_overdue_penalty_weight",
+        "ls_dropped_penalty_weight",
+        "ls_backlog_penalty_weight",
+        "dc_thermal_penalty_weight",
+        "dc_constraint_penalty_weight",
+    )
+    values = {
+        key: _finite_nonnegative(params[key], key)
+        for key in required_params
+    }
+    config = {
+        key: _finite_nonnegative(reward_config[key], f"reward.{key}")
+        for key in required_config
+    }
+    if config["scale"] == 0.0:
+        raise ValueError("reward.scale must be positive")
+
+    shared_tariff_cost_reward = (
+        -config["scale"] * values["total_price_cost_this_step_c"]
+    )
+    ls_overdue_penalty = (
+        config["ls_overdue_penalty_weight"] * values["ls_overdue_penalty"]
+    )
+    ls_dropped_penalty = (
+        config["ls_dropped_penalty_weight"] * values["ls_tasks_dropped"]
+    )
+    ls_backlog_penalty = (
+        config["ls_backlog_penalty_weight"]
+        * values["ls_norm_tasks_in_queue"]
+    )
+    dc_thermal_penalty = config["dc_thermal_penalty_weight"] * max(
+        0.0, values["dc_int_temperature"] - values["dc_thermal_limit_c"]
+    )
+    dc_constraint_penalty = (
+        config["dc_constraint_penalty_weight"]
+        * values["dc_constraint_violation"]
+    )
+    bat_degradation_penalty = (
+        config["degradation_cost_weight"]
+        * config["scale"]
+        * values["bat_degradation_cost_c"]
+    )
+    bat_terminal_soc_penalty = values["bat_terminal_soc_penalty_component"]
+
+    components = {
+        "shared_facility_cost_c": values["total_price_cost_this_step_c"],
+        "shared_tariff_cost_reward": shared_tariff_cost_reward,
+        "ls_overdue_penalty_component": ls_overdue_penalty,
+        "ls_dropped_penalty_component": ls_dropped_penalty,
+        "ls_backlog_penalty_component": ls_backlog_penalty,
+        "dc_thermal_penalty_component": dc_thermal_penalty,
+        "dc_constraint_penalty_component": dc_constraint_penalty,
+        "bat_terminal_soc_penalty_component": bat_terminal_soc_penalty,
+        "bat_degradation_penalty_component": bat_degradation_penalty,
+    }
+    rewards = {
+        "agent_ls": (
+            shared_tariff_cost_reward
+            - ls_overdue_penalty
+            - ls_dropped_penalty
+            - ls_backlog_penalty
+        ),
+        "agent_dc": (
+            shared_tariff_cost_reward
+            - dc_thermal_penalty
+            - dc_constraint_penalty
+        ),
+        "agent_bat": (
+            shared_tariff_cost_reward
+            - bat_terminal_soc_penalty
+            - bat_degradation_penalty
+        ),
+    }
+    return rewards, components
+
+
+def _finite_nonnegative(value: float, name: str) -> float:
+    if isinstance(value, bool) or not np.isfinite(float(value)) or float(value) < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return float(value)
+
+
 def custom_agent_reward(params: dict) -> float:
     """
     A template for creating a custom agent reward function.

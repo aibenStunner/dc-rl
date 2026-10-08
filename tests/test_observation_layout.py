@@ -153,6 +153,16 @@ def test_price_block_is_the_last_three_slots_of_every_agent():
         assert np.allclose(obs[agent][-3:], expected, atol=1e-6), agent
 
 
+def test_fp_shared_critic_space_adds_agent_identity_features():
+    from harl.envs.sustaindc.sustaindc_ptzoo import SustainDCPettingZooEnv
+
+    env = SustainDCPettingZooEnv(
+        dict(_ENV_CONFIG, state_type="FP", partial_obs=True,
+             nonoverlapping_shared_obs_space=True)
+    )
+    assert all(space.shape == (46,) for space in env.share_observation_space.values())
+
+
 def test_shared_observation_width_matches_what_is_produced():
     """The exact mismatch that crashed training: sustaindc_ptzoo.py sizes the
     critic's Box, harlsustaindc_env.py fills it, and the two are computed in

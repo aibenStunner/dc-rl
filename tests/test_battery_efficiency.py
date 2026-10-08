@@ -149,6 +149,24 @@ def test_invalid_degradation_cost_is_rejected():
             raise AssertionError(f"expected {value!r} to fail")
 
 
+def test_battery_reset_uses_configured_initial_soc():
+    env = _env(max_bat_cap=2.0, initial_soc=0.5)
+    _, info = env.reset()
+    assert env.get_battery_soc() == 0.5
+    assert info["bat_SOC"] == 0.5
+    assert env.battery.current_load == 1.0
+
+
+def test_invalid_initial_soc_is_rejected():
+    for value in (-0.01, 1.01, math.nan):
+        try:
+            _env(initial_soc=value)
+        except ValueError as exc:
+            assert "initial_soc" in str(exc)
+        else:
+            raise AssertionError(f"expected {value!r} to fail")
+
+
 def test_grid_meter_uses_bus_energy_and_reported_degradation_uses_cell_throughput():
     env = _env()
     env.reset()

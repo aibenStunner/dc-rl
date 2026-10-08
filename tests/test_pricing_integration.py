@@ -80,6 +80,102 @@ def test_env_constructs_resets_and_steps_with_nested_pricing():
     assert all(agent in truncated for agent in _ENV_CONFIG["agents"])
 
 
+def test_flexible_load_config_reaches_load_shifting_environment():
+    env = SustainDC({**_ENV_CONFIG, "flexible_load": 0.6})
+    assert env.ls_env.flexible_workload_ratio == 0.6
+
+
+def test_targeted_mode_uses_valid_midnight_starts():
+    env = SustainDC({
+        **_ENV_CONFIG,
+        "days_per_episode": 30,
+        "sample_whole_year": True,
+        "episode_start_policy": "valid_midnight",
+        "reward": {"mode": "team_tariff_targeted_safeguards"},
+    })
+    for _ in range(8):
+        env.reset()
+        assert 0 <= env.t_m.day <= 335
+        assert env.current_hour == 0.0
+
+
+def test_terminal_soc_settlement_is_battery_specific_and_one_time():
+    env = SustainDC({
+        **_ENV_CONFIG,
+        "days_per_episode": 1,
+        "episode_start_policy": "valid_midnight",
+        "battery": {
+            "round_trip_efficiency": 0.90,
+            "degradation_cost_c_per_kwh": 5.78,
+            "initial_soc": 0.5,
+        },
+        "reward": {"mode": "team_tariff_targeted_safeguards"},
+    })
+    env.reset()
+    env.bat_env.battery.current_load = env.bat_env.max_bat_cap * 0.25
+    env.price_m.get_current_price_denorm = lambda: 10.0
+
+    first = env._terminal_soc_settlement(True)
+    second = env._terminal_soc_settlement(True)
+    expected_restore = 0.25 * env.bat_env.max_bat_cap * 1000.0 / env.bat_env.battery.eff_c
+    expected_penalty = env.reward_config["scale"] * expected_restore * 10.0
+    assert first["bat_terminal_soc_restore_grid_kwh"] == expected_restore
+    assert first["bat_terminal_soc_penalty_component"] == expected_penalty
+    assert second["bat_terminal_soc_penalty_component"] == 0.0
+
+
+def test_targeted_reward_mode_logs_reconcilable_agent_rewards():
+    env = SustainDC({
+        **_ENV_CONFIG,
+        "episode_start_policy": "valid_midnight",
+        "battery": {
+            "round_trip_efficiency": 0.90,
+            "degradation_cost_c_per_kwh": 5.78,
+            "initial_soc": 0.5,
+        },
+        "reward": {"mode": "team_tariff_targeted_safeguards"},
+    })
+    env.reset()
+    _, rewards, _, _, info = env.step(_step_actions(env))
+    common = info["__common__"]
+    required = {
+        "shared_facility_cost_c",
+        "shared_tariff_cost_reward",
+        "ls_overdue_penalty_component",
+        "ls_dropped_penalty_component",
+        "ls_backlog_penalty_component",
+        "dc_thermal_penalty_component",
+        "dc_constraint_penalty_component",
+        "bat_terminal_soc_penalty_component",
+        "bat_degradation_penalty_component",
+        "agent_ls_reward",
+        "agent_dc_reward",
+        "agent_bat_reward",
+    }
+    assert required <= set(common)
+    for agent in env.agents:
+        assert rewards[agent] == common[f"{agent}_reward"]
+    assert common["shared_tariff_cost_reward"] == (
+        -env.reward_config["scale"] * common["total_price_cost_this_step_c"]
+    )
+    assert common["agent_ls_reward"] == (
+        common["shared_tariff_cost_reward"]
+        - common["ls_overdue_penalty_component"]
+        - common["ls_dropped_penalty_component"]
+        - common["ls_backlog_penalty_component"]
+    )
+    assert common["agent_dc_reward"] == (
+        common["shared_tariff_cost_reward"]
+        - common["dc_thermal_penalty_component"]
+        - common["dc_constraint_penalty_component"]
+    )
+    assert common["agent_bat_reward"] == (
+        common["shared_tariff_cost_reward"]
+        - common["bat_terminal_soc_penalty_component"]
+        - common["bat_degradation_penalty_component"]
+    )
+
+
 def test_info_uses_model_neutral_charge_keys_only():
     env = _make_env()
     env.reset()

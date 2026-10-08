@@ -56,8 +56,11 @@ class Battery2:
         self.lower_lim_v = float(lower_v)
         self.last_flow = BatteryFlow()
 
-    def reset(self):
-        self.current_load = 0.0
+    def reset(self, initial_soc=0.0):
+        """Reset cell energy to a validated fraction of usable capacity."""
+        if not _is_finite_nonnegative(initial_soc) or float(initial_soc) > 1.0:
+            raise ValueError("initial_soc must be finite in [0, 1]")
+        self.current_load = self.capacity * float(initial_soc)
         self.last_flow = BatteryFlow()
 
     def calc_max_charge_bus_power(self, duration_hours):

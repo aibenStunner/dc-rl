@@ -8,6 +8,18 @@ import supersuit as ss
 from harl.envs.sustaindc.sustaindc_ptzoo import SustainDCPettingZooEnv
 from pettingzoo.utils.conversions import parallel_wrapper_fn
 from sustaindc_env import SustainDC  # for the published observation layout indices
+
+
+def fp_critic_observations(facility_state, num_agents):
+    """Append one critic-only identity vector to each facility state copy."""
+    state = np.asarray(facility_state, dtype=np.float32)
+    identities = np.eye(num_agents, dtype=np.float32)
+    return np.array(
+        [np.concatenate((state, identity)) for identity in identities],
+        dtype=np.float32,
+    )
+
+
 class HARLSustainDCEnv:
     def __init__(self, env_args):
         """
@@ -91,7 +103,9 @@ class HARLSustainDCEnv:
             states = np.array(concat_states, dtype=np.float32)
         else:
             states = np.concatenate(states, axis=None)
-        
+
+        if self.env_args.get("state_type", "EP") == "FP":
+            return fp_critic_observations(states, self.n_agents)
         return self.repeat(states)
 
     def reset(self):

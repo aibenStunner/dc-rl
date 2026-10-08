@@ -19,6 +19,7 @@ class BatteryEnvFwd(gym.Env):
         self.degradation_cost_c_per_kwh = _validate_degradation_cost(
             env_config['degradation_cost_c_per_kwh']
         )
+        self.initial_soc = _validate_initial_soc(env_config.get('initial_soc', 0.0))
         self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(27)),
                                             high=np.float32(1.0 * np.ones(27)))
         self.max_dc_pw_MW = env_config['max_dc_pw_MW']
@@ -59,7 +60,7 @@ class BatteryEnvFwd(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self.battery.reset()
+        self.battery.reset(initial_soc=self.initial_soc)
         self._reset_episode_metrics()
         self.dcload = self.dcload_min
         self.raw_obs = self._hist_data_collector()
@@ -184,4 +185,10 @@ def _validate_rte(value):
 def _validate_degradation_cost(value):
     if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
         raise ValueError('degradation_cost_c_per_kwh must be finite and non-negative')
+    return float(value)
+
+
+def _validate_initial_soc(value):
+    if isinstance(value, bool) or not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+        raise ValueError('initial_soc must be finite in [0, 1]')
     return float(value)

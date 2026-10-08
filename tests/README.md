@@ -74,5 +74,9 @@ Conventions worth keeping:
 | `test_pricing_manager.py` | Manager lifecycle, state/carry transactions, and standardized outputs |
 | `test_pricing_integration.py` | Nested pricing config through a real `SustainDC` reset/step |
 | `test_observation_layout.py` | Observation vector and shared-critic layout stability |
-| `test_battery_efficiency.py` | Efficiency-aware bus/cell flows, round-trip energy, grid meter identity, throughput degradation reporting, and battery config propagation |
+| `test_battery_efficiency.py` | Efficiency-aware bus/cell flows, round-trip energy, grid meter identity, initial SoC reset, throughput degradation reporting, and battery config propagation |
+| `test_team_tariff_reward.py` | Experiment 1 shared tariff components, targeted safeguards, configuration validation, and legacy reward preservation |
+| `test_harl_reward_delivery.py` | EP reward-contract rejection, FP per-agent return preservation, and FP critic agent identity |
 | `test_pv_manager.py` | pvlib Montréal EPW parsing, fixed-tilt AC production, capacity scaling, hourly-to-quarter-hour energy conservation, and PV/grid meter balance |
+
+Experiment 1 uses independent 30-day episode accounting for training and initial evaluation. It is not a contiguous headline utility-bill reconstruction.

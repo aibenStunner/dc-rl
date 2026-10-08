@@ -170,8 +170,8 @@ class dc_gymenv(gym.Env):
         if self.consecutive_actions > 3:
             self.action_scaling_factor += 1  # Increase the scale factor after every 3 consecutive actions
         
-        self.raw_curr_stpt += crac_setpoint_delta * self.action_scaling_factor
-        self.raw_curr_stpt = max(min(self.raw_curr_stpt, self.max_temp), self.min_temp)
+        requested_setpoint = self.raw_curr_stpt + crac_setpoint_delta * self.action_scaling_factor
+        self.raw_curr_stpt = max(min(requested_setpoint, self.max_temp), self.min_temp)
     
         ITE_load_pct_list = [self.cpu_load_frac*100 for i in range(self.DC_Config.NUM_RACKS)] 
 
@@ -218,6 +218,10 @@ class dc_gymenv(gym.Env):
             'dc_total_power_kW': (data_center_total_ITE_Load + self.CT_Cooling_load + self.Compressor_load) / 1e3,
             'dc_crac_setpoint_delta': crac_setpoint_delta,
             'dc_crac_setpoint': self.raw_curr_stpt,
+            'dc_thermal_limit_c': self.max_temp,
+            'dc_constraint_violation': float(
+                requested_setpoint < self.min_temp or requested_setpoint > self.max_temp
+            ),
             'dc_cpu_workload_fraction': self.cpu_load_frac,
             'dc_int_temperature': np.mean(self.rackwise_outlet_temp),
             'dc_exterior_ambient_temp': self.ambient_temp,

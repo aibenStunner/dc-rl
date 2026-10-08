@@ -21,6 +21,7 @@ def make_ls_env(month,
                 n_vars_energy : int = 4,
                 n_vars_battery : int = 1,
                 queue_max_len: int = 500,
+                flexible_workload_ratio: float = 0.2,
                 test_mode = False):
     """Method to build the Load shifting environment
 
@@ -38,6 +39,7 @@ def make_ls_env(month,
                          n_vars_energy=n_vars_energy,
                          n_vars_battery=n_vars_battery,
                          queue_max_len=queue_max_len,
+                         flexible_workload_ratio=flexible_workload_ratio,
                          test_mode=test_mode)
     
     
@@ -50,7 +52,8 @@ def make_bat_fwd_env(month,
                     dcload_min : float = 0.1,
                     n_fwd_steps : int = 4,
                     round_trip_efficiency : float = 0.90,
-                    degradation_cost_c_per_kwh : float = 5.78
+                    degradation_cost_c_per_kwh : float = 5.78,
+                    initial_soc: float = 0.0
                     ):
     """Method to build the Battery environment.
 
@@ -72,7 +75,8 @@ def make_bat_fwd_env(month,
                  'dcload_max':dcload_max, 
                  'dcload_min':dcload_min,
                  'round_trip_efficiency': round_trip_efficiency,
-                 'degradation_cost_c_per_kwh': degradation_cost_c_per_kwh}
+                 'degradation_cost_c_per_kwh': degradation_cost_c_per_kwh,
+                 'initial_soc': initial_soc}
     bat_env = battery_env_fwd(env_config)
     return bat_env
 

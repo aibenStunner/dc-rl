@@ -34,6 +34,8 @@ class SustainDCPettingZooEnv(ParallelEnv):
             # adding features to the agent states (e.g. the price block) can't
             # silently desync this from the data actually produced.
             shared_dim = max(space.shape[0] for space in self.observation_spaces.values()) + 2 + 1  # pick largest observation space and add 2 for next_workload and next_exterior_temp, and 1 for battery SOC
+            if env_config.get("state_type", "EP") == "FP":
+                shared_dim += len(self.possible_agents)
             self.share_observation_space = {agent: spaces.Box(low=-2.0, high=2.0, shape=(shared_dim,), dtype=np.float32) for agent in self.possible_agents}
         else:
             # Find the maximum dimension of observation space

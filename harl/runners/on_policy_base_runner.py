@@ -26,6 +26,18 @@ from harl.envs import LOGGER_REGISTRY
 import time
 
 
+def select_ep_team_rewards(rewards: np.ndarray, *, atol: float = 1e-7) -> np.ndarray:
+    """Validate a scalar EP return is identical for every active agent."""
+    if rewards.ndim != 3 or rewards.shape[-1] != 1:
+        raise ValueError("EP rewards must have shape (threads, agents, 1)")
+    if not np.allclose(rewards, rewards[:, :1, :], rtol=0.0, atol=atol):
+        raise ValueError(
+            "EP requires identical per-agent rewards; use FP for targeted rewards "
+            "or configure an explicit scalar reward experiment."
+        )
+    return rewards[:, 0]
+
+
 class OnPolicyBaseRunner:
     """Base runner for on-policy algorithms."""
 
@@ -493,7 +505,7 @@ class OnPolicyBaseRunner:
                 share_obs[:, 0],
                 rnn_states_critic,
                 values,
-                rewards[:, 0],
+                select_ep_team_rewards(rewards),
                 masks[:, 0],
                 bad_masks,
             )
