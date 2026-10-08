@@ -70,9 +70,9 @@ def test_widths_are_the_expected_values():
     """Pin the numbers so a width change has to be deliberate."""
     env = _get_env()
     obs = env.reset()
-    assert obs["agent_ls"].shape[0] == 31, obs["agent_ls"].shape
-    assert obs["agent_dc"].shape[0] == 19, obs["agent_dc"].shape
-    assert obs["agent_bat"].shape[0] == 18, obs["agent_bat"].shape
+    assert obs["agent_ls"].shape[0] == 40, obs["agent_ls"].shape
+    assert obs["agent_dc"].shape[0] == 28, obs["agent_dc"].shape
+    assert obs["agent_bat"].shape[0] == 27, obs["agent_bat"].shape
 
 
 def test_shared_prefix_is_identical_across_agents():
@@ -121,6 +121,25 @@ def test_layout_indices_point_at_the_features_they_claim():
 
     nt_slot = float(obs["agent_dc"][SustainDC.DC_IDX["next_out_temp"]])
     assert abs(nt_slot - env.weather_m.get_next_temperature()) < 1e-6
+
+
+def test_pv_block_precedes_and_does_not_displace_trailing_price_block():
+    env = _get_env()
+    obs = env.reset()
+    expected_pv = env._pv_feature_block()
+    expected_price = env._price_feature_block()
+    for agent in ("agent_ls", "agent_dc", "agent_bat"):
+        assert np.allclose(obs[agent][-12:-3], expected_pv, atol=1e-6), agent
+        assert np.allclose(obs[agent][-3:], expected_price, atol=1e-6), agent
+
+
+def test_pv_observation_widths_and_shared_critic_width_are_pinned():
+    env = _get_env()
+    obs = env.reset()
+    assert [obs[a].shape[0] for a in env.agents] == [40, 28, 27]
+    # The non-overlapping critic receives the entire widest (LS) vector,
+    # then DC next workload/temperature and battery SoC.
+    assert obs["agent_ls"].shape[0] + 2 + 1 == 43
 
 
 def test_price_block_is_the_last_three_slots_of_every_agent():

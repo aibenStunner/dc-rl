@@ -75,3 +75,4 @@ Conventions worth keeping:
 | `test_pricing_integration.py` | Nested pricing config through a real `SustainDC` reset/step |
 | `test_observation_layout.py` | Observation vector and shared-critic layout stability |
 | `test_battery_efficiency.py` | Efficiency-aware bus/cell flows, round-trip energy, grid meter identity, throughput degradation reporting, and battery config propagation |
+| `test_pv_manager.py` | pvlib Montréal EPW parsing, fixed-tilt AC production, capacity scaling, hourly-to-quarter-hour energy conservation, and PV/grid meter balance |

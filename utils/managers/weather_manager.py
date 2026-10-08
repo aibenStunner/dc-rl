@@ -26,7 +26,7 @@ class Weather_Manager():
         pres_column (int, optional): Column that contains the pressure data. Defaults to 9.
         timezone_shift (int, optional): Shift for the timezone. Defaults to 0.
     """
-    def __init__(self, filename='', location='NY', init_day=0, weight=0.02, desired_std_dev=0.75, temp_column=6, rh_column=8, pres_column=9, timezone_shift=0, debug=False):
+    def __init__(self, filename='', location='NY', init_day=0, weight=0.02, desired_std_dev=0.75, temp_column=6, rh_column=8, pres_column=9, timezone_shift=0, debug=False, randomize=True):
         """Initialize the Weather_Manager class.
 
         Args:
@@ -92,6 +92,9 @@ class Weather_Manager():
         self.time_steps_day = self.timestep_per_hour*24
         
         self.debug = debug
+        if type(randomize) is not bool:
+            raise ValueError("weather.randomize must be a boolean")
+        self.randomize = randomize
 
     # Function to return all weather data
     def get_total_weather(self):
@@ -116,7 +119,7 @@ class Weather_Manager():
 
         self.time_step = (init_day if init_day is not None else self.init_day) * self.time_steps_day + (init_hour if init_hour is not None else 0) * self.timestep_per_hour
         
-        if not self.debug:
+        if not self.debug and self.randomize:
             # Add noise to the temperature data using the CoherentNoise
             coh_noise = self.coherent_noise.generate(len(self.original_temp_data))
             # print(f'TODO: check the generated coherent noise: {coh_noise[:3]} and the original temperature data: {self.original_temp_data[:3]} and the wet bulb data: {self.original_wb_data[:3]}' )
@@ -137,7 +140,7 @@ class Weather_Manager():
             min_30_days = np.min(self.wet_bulb_data[self.time_step:30*self.time_steps_day + self.time_step])
             self.norm_wet_bulb_data = (self.wet_bulb_data - min_30_days) / (max_30_days - min_30_days)
             
-        else:
+        elif self.debug:
             # Use a fixed temperature for debugging and wet bulb temperature
             self.temperature_data = np.ones_like(self.temperature_data) * 30
             self.norm_temp_data = np.ones_like(self.norm_temp_data) * 0.5

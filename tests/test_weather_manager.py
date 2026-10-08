@@ -53,6 +53,14 @@ def test_seeded_reset_is_reproducible_and_getters_match_outputs():
     assert np.all((first.temperature_data >= 0.0) & (first.temperature_data <= 45.0))
 
 
+def test_randomize_false_preserves_unperturbed_epw_temperature_trace():
+    manager = Weather_Manager(location=_WEATHER, randomize=False)
+    manager.reset(init_day=100, init_hour=12)
+    index = 100 * manager.time_steps_day + 12 * manager.timestep_per_hour
+    assert manager.temperature_data[index] == manager.original_temp_data[index]
+    assert manager.wet_bulb_data[index] == manager.original_wb_data[index]
+
+
 def test_future_temperature_window_wraps_at_annual_boundary():
     manager = Weather_Manager(location=_WEATHER, debug=True)
     manager.reset(init_day=100, init_hour=0)

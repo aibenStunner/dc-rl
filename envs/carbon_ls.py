@@ -44,7 +44,7 @@ class CarbonLoadEnv(gym.Env):
         # self.ls_state = [current_workload, queue status]
         # 26 + 3 price features (_price_feature_block) + 2 season features
         # (cos_day/sin_day) -- see sustaindc_env.py's state builders.
-        self.observation_space = spaces.Box(low=-2.0, high=2.0, shape=(31,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-2.0, high=2.0, shape=(40,), dtype=np.float32)
 
 
         self.global_total_steps = 0

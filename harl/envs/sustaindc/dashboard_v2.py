@@ -638,9 +638,11 @@ class Dashboard:
                 row=1, col=1
             )
             
-            # Subplot 2: Battery Net Energy
-            # Calculate battery_action
-            battery_action = df_window['bat_total_energy_with_battery_KWh'] - df_window['bat_total_energy_without_battery_KWh']
+            # Subplot 2: Battery Net Energy at the AC bus. Grid-import delta
+            # would conflate battery action with on-site PV self-consumption.
+            battery_action = (
+                df_window['bat_charge_bus_KWh'] - df_window['bat_discharge_bus_KWh']
+            )
 
             # Create masks for charging and discharging
             charging_mask = battery_action >= 0

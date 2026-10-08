@@ -117,6 +117,25 @@ def test_meter_reading_uses_pre_advance_pricing_clock_at_midnight():
     assert env.t_m.hour == 0.0
 
 
+def test_pricing_meter_receives_net_grid_import_not_gross_dc_energy():
+    env = _make_env()
+    env.reset()
+    captured = {}
+    original_step = env.price_m.step
+
+    def capture_step(**kwargs):
+        captured.update(kwargs)
+        return original_step(**kwargs)
+
+    env.price_m.step = capture_step
+    env.pv_m._current_ac_kwh = 25.0
+    env.step(_step_actions(env))
+    battery_info = env.bat_info
+    assert captured["metered_energy_kwh"] == battery_info["bat_grid_import_kwh"]
+    assert battery_info["bat_grid_import_kwh"] == battery_info["bat_total_energy_with_battery_KWh"]
+    assert battery_info["bat_grid_import_kwh"] <= battery_info["bat_dc_load_kwh"] + battery_info["bat_charge_bus_KWh"]
+
+
 def test_price_feature_block_remains_three_values():
     env = _make_env()
     env.reset()

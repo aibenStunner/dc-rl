@@ -7,6 +7,23 @@ agents:
 # Electricity Maps Québec direct operational carbon intensity.
 location: montreal
 cintensity_file: "QC_NG_&_avgCI.csv"
+# Keep temperature, wind, and irradiance on the same unperturbed EPW timeline
+# while PV is active. Turn on only for a separate weather-randomization study.
+weather:
+  randomize: false
+# Roof-constrained fixed-tilt on-site PV. PV AC serves the facility bus first;
+# surplus is measured and curtailed, with no export-credit assumption.
+pv:
+  enabled: true
+  capacity_fraction_of_datacenter: 0.05
+  surface_tilt_deg: 35.0
+  surface_azimuth_deg: 180.0
+  dc_ac_ratio: 1.20
+  gamma_pdc_per_deg_c: -0.0037
+  system_losses_fraction: 0.1408
+  inverter_efficiency: 0.96
+  temperature_model: close_mount_glass_glass
+  export_policy: curtail
 workload_file: "Alibaba_CPU_Data_Hourly_1.csv"
 max_bat_cap_Mw: 1.0
 # Reduced-form BESS physics. Degradation is report-only in this phase.

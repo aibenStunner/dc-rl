@@ -18,7 +18,7 @@ from utils.base_agents import (BaseBatteryAgent, BaseHVACAgent,
 from utils.rbc_agents import RBCBatteryAgent
 from utils.make_envs_pyenv import (make_bat_fwd_env, make_dc_pyeplus_env,
                                    make_ls_env)
-from utils.managers import (CI_Manager, Time_Manager, Weather_Manager,
+from utils.managers import (CI_Manager, PV_Manager, Time_Manager, Weather_Manager,
                             Workload_Manager)
 from utils.managers.pricing.contracts import PricingCharges
 from utils.managers.pricing.loader import load_pricing_config
@@ -67,6 +67,27 @@ class EnvConfig(dict):
             'model': 'hydro_quebec',
             'config_file': 'data/Pricing/hydro_quebec_2026.yaml',
             'options': {'tariff': 'auto', 'demand_floor_kw': 0.0},
+        },
+
+        # Weather trace controls. PV runs need the unperturbed EPW timeline
+        # so irradiance and cooling temperature remain physically synchronized.
+        'weather': {
+            'randomize': True,
+        },
+
+        # Roof-constrained fixed-tilt PV. AC output first serves the facility
+        # bus; excess is explicitly curtailed (no export credit).
+        'pv': {
+            'enabled': True,
+            'capacity_fraction_of_datacenter': 0.05,
+            'surface_tilt_deg': 35.0,
+            'surface_azimuth_deg': 180.0,
+            'dc_ac_ratio': 1.20,
+            'gamma_pdc_per_deg_c': -0.0037,
+            'system_losses_fraction': 0.1408,
+            'inverter_efficiency': 0.96,
+            'temperature_model': 'close_mount_glass_glass',
+            'export_policy': 'curtail',
         },
 
         # Timezone shift
@@ -121,13 +142,13 @@ class EnvConfig(dict):
         # merge onto their defaults so callers may override one parameter
         # without accidentally dropping the other physical assumption.
         for key, val in raw_config.items():
-            if key == "battery":
+            if key in {"battery", "weather", "pv"}:
                 if not isinstance(val, dict):
-                    raise ValueError("battery must be a mapping")
-                unknown = set(val) - set(self["battery"])
+                    raise ValueError(f"{key} must be a mapping")
+                unknown = set(val) - set(self[key])
                 if unknown:
-                    raise ValueError(f"battery.{min(unknown, key=repr)} is unknown")
-                self["battery"].update(val)
+                    raise ValueError(f"{key}.{min(unknown, key=repr)} is unknown")
+                self[key].update(val)
             else:
                 self[key] = val
 
@@ -166,6 +187,8 @@ class SustainDC(gym.Env):
         self.datacenter_capacity_mw = env_config['datacenter_capacity_mw']
         self.dc_config_file = env_config['dc_config_file']
         self.timezone_shift = env_config['timezone_shift']
+        self.weather_config = env_config['weather']
+        self.pv_config = env_config['pv']
         self.days_per_episode = env_config['days_per_episode']
         
         # Assign month according to worker index, if available
@@ -195,7 +218,8 @@ class SustainDC(gym.Env):
         self.bat_reward_method = reward_creator.get_reward_method(bat_reward_method)
         
         n_vars_energy, n_vars_battery = 0, 0  # For partial observability (for p.o.)
-        n_vars_ci = 8
+        self.n_vars_ci = 8
+        n_vars_ci = self.n_vars_ci
         self.ls_env = make_ls_env(month=self.month, test_mode=self.evaluation_mode, n_vars_ci=n_vars_ci, 
                                   n_vars_energy=n_vars_energy, n_vars_battery=n_vars_battery, queue_max_len=1000)
         self.dc_env, _ = make_dc_pyeplus_env(month=self.month + 1, location=ci_loc, max_bat_cap_Mw=self.max_bat_cap_Mw, use_ls_cpu_load=True, 
@@ -251,7 +275,14 @@ class SustainDC(gym.Env):
         self.ranges_day = [max(0, self.init_day - 7), min(364, self.init_day + 7)]
         self.t_m = Time_Manager(self.init_day, timezone_shift=self.timezone_shift, days_per_episode=self.days_per_episode)
         self.workload_m = Workload_Manager(init_day=self.init_day, workload_filename=self.workload_file, timezone_shift=self.timezone_shift)
-        self.weather_m = Weather_Manager(init_day=self.init_day, location=wea_loc, filename=self.weather_file, timezone_shift=self.timezone_shift)
+        self.weather_m = Weather_Manager(init_day=self.init_day, location=wea_loc, filename=self.weather_file, timezone_shift=self.timezone_shift, randomize=self.weather_config['randomize'])
+        self.pv_m = PV_Manager(
+            epw_filename=wea_loc,
+            datacenter_capacity_mw=self.datacenter_capacity_mw,
+            timezone_shift=self.timezone_shift,
+            init_day=self.init_day,
+            **self.pv_config,
+        )
         self.ci_m = CI_Manager(init_day=self.init_day, location=ci_loc, filename=self.ci_file, future_steps=n_vars_ci, timezone_shift=self.timezone_shift)
         self.sample_whole_year = env_config.get('sample_whole_year', False)
         self.pricing_config = load_pricing_config(env_config, _REPO_ROOT)
@@ -386,6 +417,13 @@ class SustainDC(gym.Env):
         "battery_soc": OBS_PREFIX_LEN + 2,
     }
 
+    def _pv_feature_block(self):
+        """Current normalized PV AC plus the next eight interval forecasts."""
+        return np.hstack((
+            self.pv_m.get_current_ac_norm(),
+            self.pv_m.get_forecast_ac_norm(),
+        )).astype(np.float32)
+
     def _price_feature_block(self):
         """Return the normalized price, billing progress, and normalized peak.
 
@@ -398,7 +436,7 @@ class SustainDC(gym.Env):
             self.price_m.get_normalized_peak(),
         ], dtype=np.float32)
 
-    def _create_ls_state(self, t_i, current_workload, queue_status, current_ci, ci_future, ci_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, price_features):
+    def _create_ls_state(self, t_i, current_workload, queue_status, current_ci, ci_future, ci_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, pv_features, price_features):
         """
         Create the state of the load shifting environment.
 
@@ -452,13 +490,14 @@ class SustainDC(gym.Env):
                                         current_out_temperature,
                                         temperature_features,
                                         ls_task_age_histogram,
+                                        pv_features,
                                         price_features
                                     )))
-        if len(ls_state) != 31:
+        if len(ls_state) != 40:
             print(f'Error: {len(ls_state)}')
         return ls_state
 
-    def _create_dc_state(self, t_i, current_workload, next_workload, current_ci, ci_future, ci_past, current_out_temperature, next_out_temperature, price_features):
+    def _create_dc_state(self, t_i, current_workload, next_workload, current_ci, ci_future, ci_past, current_out_temperature, next_out_temperature, pv_features, price_features):
         """
         Create the state of the data center environment.
 
@@ -496,13 +535,14 @@ class SustainDC(gym.Env):
                                          next_workload,
                                          current_out_temperature,
                                          next_out_temperature,
+                                         pv_features,
                                          price_features,
                                         )))
 
         return dc_state
 
 
-    def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature, price_features):
+    def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature, pv_features, price_features):
         """
         Create the state of the battery environment.
 
@@ -539,6 +579,7 @@ class SustainDC(gym.Env):
                                           current_workload,
                                           current_temperature,
                                           battery_soc,
+                                          pv_features,
                                           price_features
                                         )))
         return bat_state
@@ -577,6 +618,7 @@ class SustainDC(gym.Env):
         t_i = self.t_m.reset(init_day=random_init_day, init_hour=random_init_hour)
         workload = self.workload_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Workload manager
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Weather manager
+        pv_ac_kwh, pv_forecast_kwh = self.pv_m.reset(init_day=random_init_day, init_hour=random_init_hour, future_steps=self.n_vars_ci)
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # CI manager. ci_i -> CI in the current timestep.
         # Preserve model-neutral billing state across normal resets.
         self.price_m.reset(init_day=random_init_day, init_hour=random_init_hour)
@@ -606,14 +648,15 @@ class SustainDC(gym.Env):
         oldest_task_age = self.ls_info['ls_oldest_task_age']
         average_task_age = self.ls_info['ls_average_task_age']
         ls_task_age_histogram = self.ls_info['ls_task_age_histogram']
+        pv_features = self._pv_feature_block()
         price_features = self._price_feature_block()
-        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, price_features)
+        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, pv_features, price_features)
 
-        self.dc_state = self._create_dc_state(t_i, current_workload, next_workload,  ci_i, ci_i_future, ci_i_past, current_out_temperature, next_out_temperature, price_features)
+        self.dc_state = self._create_dc_state(t_i, current_workload, next_workload,  ci_i, ci_i_future, ci_i_past, current_out_temperature, next_out_temperature, pv_features, price_features)
         # bat_state -> [time (sine/cosine enconded), battery SoC, current+future normalized CI]
         # self.bat_state = np.float32(np.hstack((t_i, bat_s, ci_i_future)))
         battery_soc = self.bat_env.get_battery_soc()
-        self.bat_state = self._create_bat_state(t_i, current_workload, battery_soc, ci_i, ci_i_future, ci_i_past, current_out_temperature, price_features)
+        self.bat_state = self._create_bat_state(t_i, current_workload, battery_soc, ci_i, ci_i_future, ci_i_past, current_out_temperature, pv_features, price_features)
 
         # Update ci in the battery environment
         self.bat_env.update_ci(ci_i_denorm, ci_i_future[0])
@@ -640,6 +683,10 @@ class SustainDC(gym.Env):
                 'weather': temp,
                 'ci': ci_i,
                 'ci_future': ci_i_future,
+                'pv_ac_kwh': self.pv_m.get_current_ac_kwh(),
+                'pv_forecast_ac_kwh': self.pv_m.get_forecast_ac_kwh(),
+                'pv_ac_kwh': self.pv_m.get_current_ac_kwh(),
+                'pv_forecast_ac_kwh': self.pv_m.get_forecast_ac_kwh(),
                 'states': {
                     'agent_ls': self.ls_state,
                     'agent_dc': self.dc_state,
@@ -682,6 +729,7 @@ class SustainDC(gym.Env):
         day, hour, t_i, terminal = self.t_m.step()
         workload = self.workload_m.step()
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.step()
+        pv_ac_kwh, pv_forecast_kwh = self.pv_m.step(future_steps=self.n_vars_ci)
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.step()
         # Price manager bills the energy that was consumed during the action
         # interval against the PRE-advance clock. The managers below now
@@ -712,12 +760,13 @@ class SustainDC(gym.Env):
         next_n_out_temperature = self.weather_m.get_n_next_temperature(n=16)
 
         
+        pv_features = self._pv_feature_block()
         price_features = self._price_feature_block()
-        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, norm_temp, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, price_features)
-        self.dc_state = self._create_dc_state(t_i, workload, next_workload,  ci_i, ci_i_future, ci_i_past, norm_temp, next_out_temperature, price_features)
+        self.ls_state = self._create_ls_state(t_i, workload, queue_status, ci_i, ci_i_future, ci_i_past, next_workload, norm_temp, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, pv_features, price_features)
+        self.dc_state = self._create_dc_state(t_i, workload, next_workload,  ci_i, ci_i_future, ci_i_past, norm_temp, next_out_temperature, pv_features, price_features)
 
         battery_soc = self.bat_env.get_battery_soc()
-        self.bat_state = self._create_bat_state(t_i, workload, battery_soc, ci_i, ci_i_future, ci_i_past, norm_temp, price_features)
+        self.bat_state = self._create_bat_state(t_i, workload, battery_soc, ci_i, ci_i_future, ci_i_past, norm_temp, pv_features, price_features)
 
         # Populate observation dictionary based on updated states
         obs = self._populate_observation_dict()
@@ -795,6 +844,7 @@ class SustainDC(gym.Env):
             print(f'Warning, using base agent for agent_bat: {action}')
             
         self.bat_env.set_dcload(self.dc_info['dc_total_power_kW'] / 1e3)
+        self.bat_env.set_pv_ac_energy_kwh(self.pv_m.get_current_ac_kwh())
         self.bat_state, _, self.bat_terminated, self.bat_truncated, self.bat_info = self.bat_env.step(action)
 
 

@@ -33,6 +33,20 @@ Example Configuration
             'options': {'tariff': 'auto', 'demand_floor_kw': 0.0},
         },
 
+        # On-site rooftop PV: 5% of data-centre nameplate by default
+        'pv': {
+            'enabled': True,
+            'capacity_fraction_of_datacenter': 0.05,
+            'surface_tilt_deg': 35.0,
+            'surface_azimuth_deg': 180.0,
+            'dc_ac_ratio': 1.20,
+            'gamma_pdc_per_deg_c': -0.0037,
+            'system_losses_fraction': 0.1408,
+            'inverter_efficiency': 0.96,
+            'temperature_model': 'close_mount_glass_glass',
+            'export_policy': 'curtail',
+        },
+
         # Maximum battery capacity
         'max_bat_cap_Mw': 2,
 

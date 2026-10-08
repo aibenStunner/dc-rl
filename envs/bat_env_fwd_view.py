@@ -19,8 +19,8 @@ class BatteryEnvFwd(gym.Env):
         self.degradation_cost_c_per_kwh = _validate_degradation_cost(
             env_config['degradation_cost_c_per_kwh']
         )
-        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(18)),
-                                            high=np.float32(1.0 * np.ones(18)))
+        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(27)),
+                                            high=np.float32(1.0 * np.ones(27)))
         self.max_dc_pw_MW = env_config['max_dc_pw_MW']
         self.action_space = spaces.Discrete(3)
         self._action_to_direction = {0: 'charge', 1: 'discharge', 2: 'idle'}
@@ -51,6 +51,9 @@ class BatteryEnvFwd(gym.Env):
         self.last_flow = batt.BatteryFlow()
         self.total_energy_with_battery = 0.0
         self.CO2_total = 0.0
+        self.pv_ac_kwh = 0.0
+        self.pv_self_consumed_kwh = 0.0
+        self.pv_curtailed_kwh = 0.0
         self.cumulative_cell_throughput_kwh = 0.0
         self.cumulative_degradation_cost_c = 0.0
 
@@ -84,6 +87,9 @@ class BatteryEnvFwd(gym.Env):
             'bat_total_energy_with_battery_KWh': self.total_energy_with_battery,
             'bat_grid_import_kwh': self.total_energy_with_battery,
             'bat_dc_load_kwh': base_kwh,
+            'pv_ac_kwh': self.pv_ac_kwh,
+            'pv_self_consumed_kwh': self.pv_self_consumed_kwh,
+            'pv_curtailed_kwh': self.pv_curtailed_kwh,
             'bat_charge_bus_KWh': flow.charge_bus_mwh * 1000.0,
             'bat_discharge_bus_KWh': flow.discharge_bus_mwh * 1000.0,
             'bat_charge_cell_KWh': flow.charge_cell_mwh * 1000.0,
@@ -111,6 +117,11 @@ class BatteryEnvFwd(gym.Env):
     def set_dcload(self, dc_load):
         self.dcload = dc_load
 
+    def set_pv_ac_energy_kwh(self, pv_ac_kwh):
+        if isinstance(pv_ac_kwh, bool) or not math.isfinite(float(pv_ac_kwh)) or float(pv_ac_kwh) < 0.0:
+            raise ValueError("pv_ac_kwh must be finite and non-negative")
+        self.pv_ac_kwh = float(pv_ac_kwh)
+
     def get_battery_soc(self):
         return self.battery.get_battery_soc()
 
@@ -128,10 +139,13 @@ class BatteryEnvFwd(gym.Env):
 
     def _update_grid_meter_and_co2(self, flow):
         base_kwh = self.dcload * 1000.0 * self.STEP_HOURS
-        grid_import_kwh = max(
-            0.0,
-            base_kwh + flow.charge_bus_mwh * 1000.0 - flow.discharge_bus_mwh * 1000.0,
+        net_bus_kwh = (
+            base_kwh + flow.charge_bus_mwh * 1000.0
+            - flow.discharge_bus_mwh * 1000.0 - self.pv_ac_kwh
         )
+        grid_import_kwh = max(0.0, net_bus_kwh)
+        self.pv_curtailed_kwh = max(0.0, -net_bus_kwh)
+        self.pv_self_consumed_kwh = self.pv_ac_kwh - self.pv_curtailed_kwh
         self.total_energy_with_battery = grid_import_kwh
         self.energy_added_removed = getattr(self, 'energy_added_removed', [])
         self.energy_added_removed.append(grid_import_kwh - base_kwh)

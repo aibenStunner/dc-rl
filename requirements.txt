@@ -22,6 +22,9 @@ grpcio==1.51.3
 gymnasium-notices==0.0.1
 Gymnasium==0.29.1
 h5py==3.10.0
+# Exact pin keeps the PV physics and annual-energy regression stable.
+pvlib==0.13.1
+tzdata>=2024.1
 idna==3.6
 imageio==2.34.0
 jax==0.4.26

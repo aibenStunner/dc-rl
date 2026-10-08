@@ -117,8 +117,8 @@ def make_dc_pyeplus_env(month : int = 1,
     ]
     # 14 + 3 price features (_price_feature_block) + 2 season features
     # (cos_day/sin_day) -- see sustaindc_env.py's state builders.
-    observation_space = spaces.Box(low=np.float32(-1.0*np.ones(19)),
-                                    high=np.float32(1.0*np.ones(19)),
+    observation_space = spaces.Box(low=np.float32(-1.0*np.ones(28)),
+                                    high=np.float32(1.0*np.ones(28)),
                                     )
 
     

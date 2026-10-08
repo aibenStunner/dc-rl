@@ -231,6 +231,16 @@ Below is a summary of the selected locations, typical weather values, and carbon
 </div>
 
 
+## On-Site PV Scenario
+
+SustainDC supports a configurable fixed-tilt, on-site PV scenario driven by
+pvlib and the selected EPW weather file. PV AC generation serves the facility
+bus before grid import; surplus is measured as curtailed energy and is not
+exported or credited. The default scenario is a roof-constrained system sized
+at 5% of the configured data-centre nameplate, with a 35° south-facing array
+and no panel-snow or shading model. See `data/PV/Montreal_Trudeau_TMYx_2011-2025_METADATA.md`
+for provenance, assumptions, and limitations.
+
 ## Customization
 **SustainDC** offers extensive customization options to tailor the environments to specific needs and configurations. Users can modify various parameters and components across the **Workload**, **Data Center**, and **Battery** environments, as well as external variables like weather carbon intensity data, and workload trace.
 

@@ -634,6 +634,8 @@ class OnPolicyBaseRunner:
                                 key: eval_infos[i][j].get(key, None) for key in [
                                     'bat_action', 'bat_SOC', 'bat_CO2_footprint', 'bat_avg_CI', 'bat_total_energy_without_battery_KWh',
                                     'bat_total_energy_with_battery_KWh', 'bat_max_bat_cap',
+                                    'pv_ac_kwh', 'pv_self_consumed_kwh', 'pv_curtailed_kwh',
+                                    'bat_grid_import_kwh', 'bat_dc_load_kwh',
                                     'bat_charge_bus_KWh', 'bat_discharge_bus_KWh',
                                     'bat_charge_cell_KWh', 'bat_discharge_cell_KWh',
                                     'bat_cell_throughput_KWh', 'bat_cumulative_cell_throughput_KWh',
@@ -840,6 +842,8 @@ class OnPolicyBaseRunner:
                                 key: eval_infos[j].get(key, None) for key in [
                                     'bat_action', 'bat_SOC', 'bat_CO2_footprint', 'bat_avg_CI', 'bat_total_energy_without_battery_KWh',
                                     'bat_total_energy_with_battery_KWh', 'bat_max_bat_cap',
+                                    'pv_ac_kwh', 'pv_self_consumed_kwh', 'pv_curtailed_kwh',
+                                    'bat_grid_import_kwh', 'bat_dc_load_kwh',
                                     'bat_charge_bus_KWh', 'bat_discharge_bus_KWh',
                                     'bat_charge_cell_KWh', 'bat_discharge_cell_KWh',
                                     'bat_cell_throughput_KWh', 'bat_cumulative_cell_throughput_KWh',

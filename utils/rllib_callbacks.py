@@ -24,6 +24,8 @@ class CustomCallbacks(DefaultCallbacks):
             **kwargs: additional arguments that can be passed.
         """
         episode.user_data["net_energy_sum"] = 0
+        episode.user_data["pv_generation_sum"] = 0
+        episode.user_data["pv_curtailed_sum"] = 0
         episode.user_data["CO2_footprint_sum"] = 0
         
         episode.user_data["step_count"] = 0
@@ -51,6 +53,8 @@ class CustomCallbacks(DefaultCallbacks):
 
         net_energy = base_env.envs[0].bat_info["bat_total_energy_with_battery_KWh"]
         CO2_footprint = base_env.envs[0].bat_info["bat_CO2_footprint"]
+        pv_generation = base_env.envs[0].bat_info.get("pv_ac_kwh", 0)
+        pv_curtailed = base_env.envs[0].bat_info.get("pv_curtailed_kwh", 0)
         load_left = base_env.envs[0].ls_info["ls_unasigned_day_load_left"]
         
         tasks_in_queue = base_env.envs[0].ls_info["ls_tasks_in_queue"]
@@ -61,6 +65,8 @@ class CustomCallbacks(DefaultCallbacks):
         episode.user_data["instantaneous_net_energy"].append(net_energy)
         
         episode.user_data["net_energy_sum"] += net_energy
+        episode.user_data["pv_generation_sum"] += pv_generation
+        episode.user_data["pv_curtailed_sum"] += pv_curtailed
         episode.user_data["CO2_footprint_sum"] += CO2_footprint
         episode.user_data["load_left"] += load_left
         episode.user_data["ls_tasks_in_queue"] += tasks_in_queue
