@@ -132,30 +132,12 @@ def default_bat_reward(params: dict) -> float:
 
 def default_price_reward(params: dict) -> float:
     """
-    Cost-based reward: the negative of this step's real Hydro-Quebec bill
-    (energy cost + any new demand-charge peak + any Rate L winter-overrun
-    charge), scaled down to keep magnitudes RL-friendly. 
-    Unlike `default_bat_reward`'s CI-weighted reward,
-    this is NOT z-score normalized against a rolling history: a real bill
-    should read as a stable, directly interpretable cost signal, not one
-    whose meaning drifts with `energy_history`'s recent statistics.
+    Cost-based reward from the model-neutral total price charged this step.
 
-    Args:
-        params (dict): Dictionary containing parameters (populated by
-            sustaindc_env.py._calculate_reward_params from utils.price_manager.PriceManager):
-            energy_cost_this_step_c (float): exact tier-aware energy cost this step, cents.
-            demand_charge_increment_c (float): new-peak demand charge this step, cents (usually 0.0).
-            optimization_charge_increment_c (float): Rate L winter-overrun charge this step, cents
-                (a spike once per day, only under Rate L in winter; 0.0 otherwise).
-
-    Returns:
-        float: Reward value.
+    The pricing manager owns the decomposition into energy, demand, and
+    additional charges; reward code consumes only the aggregate.
     """
-    reward_scale = 0.01   # cents -> O(1) reward for stable RL training
-    total_cost_c = (params['energy_cost_this_step_c']
-                    + params['demand_charge_increment_c']
-                    + params['optimization_charge_increment_c'])
-    return -1.0 * total_cost_c * reward_scale
+    return -0.01 * params["total_price_cost_this_step_c"]
 
 
 def custom_agent_reward(params: dict) -> float:

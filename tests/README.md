@@ -11,13 +11,14 @@ PY=~/.pyenv/versions/3.10.14/envs/thesis-dcrl/bin/python
 
 $PY tests/run_all.py                  # whole suite
 $PY tests/run_all.py price            # only modules matching "price"
-$PY tests/test_price_manager.py       # one module directly
+$PY tests/test_hydro_quebec_pricing.py  # one module directly
+$PY tests/test_pricing_integration.py  # SustainDC pricing path
 ```
 
 **Use the `thesis-dcrl` interpreter, not bare `python3`** — bare `python3` is
-pyenv 3.11 and has no `gymnasium`. `test_price_manager.py` happens to work
-either way (numpy only), but `test_observation_layout.py` builds a real
-`SustainDC` and needs the full dependency stack.
+pyenv 3.11 and has no `gymnasium`. `test_flat_pricing.py` uses only the pricing package, but
+`test_observation_layout.py` and `test_pricing_integration.py` build a real
+`SustainDC` and need the full dependency stack.
 
 No pytest required — it is not a dependency of this repo and is not
 installed in the `thesis-dcrl` env. Tests are plain `test_*` functions
@@ -52,16 +53,24 @@ if __name__ == "__main__":
 `run_all.py` picks it up automatically — no registration needed.
 
 Conventions worth keeping:
-- **Pin real-world constants in their own test.** `test_price_manager.py`'s
-  `test_rate_numbers_match_the_official_tariff_pdf` exists so a later edit
-  can't silently drift a tariff figure away from the source document.
-- **Hand-compute the expected value** where the arithmetic is the thing
-  being tested (see the Rate M tier-boundary test), rather than asserting
-  against whatever the code currently returns.
+- **Pin source figures in their own test.** `test_hydro_quebec_pricing.py`
+  locks the cited tariff figures from `data/Pricing/hydro_quebec_2026.yaml`.
+- **Hand-compute expected values** where arithmetic is the behavior under test,
+  rather than asserting against current implementation output.
+- **Use manager-level tests for billing state.** `PriceManager` owns shared
+  billing-period energy and validation/rollback; individual models should be
+  tested for their own tariff or schedule rules.
 
 ## Current modules
 
 | Module | Covers |
 |---|---|
-| `test_price_manager.py` | `utils/price_manager.py` — Rate M two-tier energy + demand charge, Rate L flat energy + winter optimization charge, capacity-based rate auto-selection, running-peak demand ratchet, Rate M's 65% winter ratchet, HQ winter calendar |
-| `test_observation_layout.py` | The observation contract — declared Box widths vs what the builders emit, the shared time/CI prefix, season features, and `SustainDC.DC_IDX`/`BAT_IDX`, which `harlsustaindc_env.py` consumes **positionally** to build the critic's shared observation (a stale index there fails silently, not loudly) |
+| `test_pricing_contracts.py` | Public pricing dataclasses, immutable forecasts, and plugin protocol signatures |
+| `test_pricing_loader.py` | Strict nested config, YAML validation, built-in registry, and import-path plugins |
+| `test_flat_pricing.py` | Constant energy pricing |
+| `test_time_of_use_pricing.py` | 24-hour schedules and midnight forecast wrapping |
+| `test_time_series_pricing.py` | CSV prices, zero-order hold, source intervals, and series wrapping |
+| `test_hydro_quebec_pricing.py` | Hydro-Québec Rate M, Rate L, pending data-centre scenario, and tariff validation |
+| `test_pricing_manager.py` | Manager lifecycle, state/carry transactions, and standardized outputs |
+| `test_pricing_integration.py` | Nested pricing config through a real `SustainDC` reset/step |
+| `test_observation_layout.py` | Observation vector and shared-critic layout stability |

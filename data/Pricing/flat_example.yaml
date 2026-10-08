@@ -1,0 +1,6 @@
+schema_version: 1
+model: flat
+metadata:
+  name: Example flat rate
+  currency: CAD
+energy_price_c_per_kwh: 5.0

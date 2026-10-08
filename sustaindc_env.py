@@ -2,6 +2,8 @@ import os
 import sys
 import random
 import datetime
+import copy
+from pathlib import Path
 from typing import Optional, Tuple, Union
 
 import torch
@@ -17,8 +19,12 @@ from utils.make_envs_pyenv import (make_bat_fwd_env, make_dc_pyeplus_env,
                                    make_ls_env)
 from utils.managers import (CI_Manager, Time_Manager, Weather_Manager,
                             Workload_Manager)
-from utils.price_manager import PriceManager, is_hq_winter_day
+from utils.pricing.contracts import PricingCharges
+from utils.pricing.loader import load_pricing_config
+from utils.pricing.manager import PriceManager
 from utils.utils_cf import get_energy_variables, get_init_day, obtain_paths
+
+_REPO_ROOT = Path(__file__).resolve().parent
 
 import matplotlib
 matplotlib.use('Agg')  # Use a non-interactive backend suitable for servers without display
@@ -55,16 +61,12 @@ class EnvConfig(dict):
         # Rate L's overrun charge are unreachable without it.
         'sample_whole_year': False,
 
-        # Hydro-Quebec tariff: None = auto-select by datacenter_capacity_mw
-        # (Rate M below 5,000 kW, Rate L at/above); 'rate_m' | 'rate_l' |
-        # 'new_dc_rate' force one explicitly.
-        'tariff_rate_override': None,
-
-        # Standing demand-charge floor (kW) this facility starts each
-        # episode's running peak from -- stands in for "last winter's
-        # ratcheted billing demand" until real cross-episode carry-over is
-        # threaded through a training run (see PriceManager's docstring).
-        'demand_floor_kw': 0.0,
+        # Pluggable electricity pricing model and its model-specific options.
+        'pricing': {
+            'model': 'hydro_quebec',
+            'config_file': 'data/Pricing/hydro_quebec_2026.yaml',
+            'options': {'tariff': 'auto', 'demand_floor_kw': 0.0},
+        },
 
         # Timezone shift
         'timezone_shift': 0,
@@ -98,7 +100,14 @@ class EnvConfig(dict):
     }
 
     def __init__(self, raw_config):
-        dict.__init__(self, self.DEFAULT_CONFIG.copy())
+        removed = {"tariff_rate_override", "demand_floor_kw"}.intersection(raw_config)
+        if removed:
+            key = sorted(removed)[0]
+            raise ValueError(
+                f"{key} is no longer supported; use pricing.options."
+                f"{'tariff' if key == 'tariff_rate_override' else key}"
+            )
+        dict.__init__(self, copy.deepcopy(self.DEFAULT_CONFIG))
 
         # Override defaults with the passed config
         for key, val in raw_config.items():
@@ -219,12 +228,12 @@ class SustainDC(gym.Env):
         self.weather_m = Weather_Manager(init_day=self.init_day, location=wea_loc, filename=self.weather_file, timezone_shift=self.timezone_shift)
         self.ci_m = CI_Manager(init_day=self.init_day, location=ci_loc, filename=self.ci_file, future_steps=n_vars_ci, timezone_shift=self.timezone_shift)
         self.sample_whole_year = env_config.get('sample_whole_year', False)
-        self.tariff_rate_override = env_config.get('tariff_rate_override', None)
-        self.demand_floor_kw = env_config.get('demand_floor_kw', 0.0)
-        self.price_m = PriceManager(datacenter_capacity_mw=self.datacenter_capacity_mw,
-                                    tariff_rate_override=self.tariff_rate_override,
-                                    init_day=self.init_day, future_steps=n_vars_ci,
-                                    demand_floor_kw=self.demand_floor_kw)
+        self.pricing_config = load_pricing_config(env_config, _REPO_ROOT)
+        self.price_m = PriceManager.from_config(
+            self.pricing_config,
+            datacenter_capacity_mw=self.datacenter_capacity_mw,
+            future_steps=n_vars_ci,
+        )
 
         # This actions_are_logits is True only for MADDPG if isscontinuous actions is used on the algorithm.
         self.actions_are_logits = env_config.get("actions_are_logits", False)
@@ -352,14 +361,14 @@ class SustainDC(gym.Env):
     }
 
     def _price_feature_block(self):
-        """[current energy price (normalized), progress toward Rate M's
-        tier-2 threshold, normalized running peak demand this billing
-        period] -- roadmap item 3's "expose monthly peak demand as separate
-        state from day 1." Computed once per step and shared by all three
-        state builders, mirroring how the CI block is threaded through."""
+        """Return the normalized price, billing progress, and normalized peak.
+
+        Computed once per step and shared by all three state builders,
+        mirroring how the CI block is threaded through.
+        """
         return np.array([
             self.price_m.get_current_price(),
-            self.price_m.get_tier2_progress_fraction(),
+            self.price_m.get_billing_progress_fraction(),
             self.price_m.get_normalized_peak(),
         ], dtype=np.float32)
 
@@ -531,9 +540,8 @@ class SustainDC(gym.Env):
             # Sample the episode's start day from the WHOLE year, so training
             # visits every season. With the default month-anchored sampling
             # below, `month: 6` confines every episode to days ~174-218 and
-            # HQ's winter period (Dec 1 - Mar 31) is never reached: the demand
-            # ratchet and Rate L's winter overrun charge become unreachable
-            # code. See utils/price_manager.is_hq_winter_day.
+            # Hydro-Quebec's winter period (Dec 1 - Mar 31) is never reached:
+            # the demand ratchet and winter overrun charge become unreachable.
             random_init_day = random.randint(0, 364)
         else:
             random_init_day =  random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1])) # self.init_day 
@@ -544,12 +552,8 @@ class SustainDC(gym.Env):
         workload = self.workload_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Workload manager
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Weather manager
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # CI manager. ci_i -> CI in the current timestep.
-        # Price manager: carry the previous episode's running peak demand
-        # forward (self.price_m persists across reset() calls on this same
-        # env instance -- this is what makes the demand-charge ratchet span
-        # episode boundaries, per PriceManager's docstring).
-        self.price_m.reset(init_day=random_init_day, init_hour=random_init_hour,
-                           peak_carry_kw=self.price_m.ending_peak_kw)
+        # Preserve model-neutral billing state across normal resets.
+        self.price_m.reset(init_day=random_init_day, init_hour=random_init_hour)
 
         # Set the external ambient temperature to data center environment
         self.dc_env.set_ambient_temp(temp, wet_bulb)
@@ -640,6 +644,11 @@ class SustainDC(gym.Env):
         terminateds["__all__"] = False
         truncateds["__all__"] = False
         
+        # The actions below consume this state and the resulting meter energy
+        # belongs to this clock interval. Capture it before Time_Manager moves
+        # to the next state so prices are not shifted one interval.
+        billed_day, billed_hour = self.t_m.day, self.current_hour
+
         # Perform actions for each agent and update their respective environments
         self._perform_actions(action_dict)
     
@@ -648,13 +657,16 @@ class SustainDC(gym.Env):
         workload = self.workload_m.step()
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.step()
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.step()
-        # Price manager: must advance AFTER _perform_actions() (above), since
-        # it needs THIS step's actual metered energy -- battery-inclusive,
-        # i.e. the real grid draw -- which only exists once bat_env.step()
-        # has run (see PriceManager's module docstring).
-        self.price_m.step(
+        # Price manager bills the energy that was consumed during the action
+        # interval against the PRE-advance clock. The managers below now
+        # describe the next decision state; using their day/hour here would
+        # shift TOU/time-series prices one interval and misclassify a reading
+        # at midnight or a winter boundary.
+        step_charges = self.price_m.step(
             metered_energy_kwh=self.bat_info['bat_total_energy_with_battery_KWh'],
-            is_winter=is_hq_winter_day(day))
+            day_of_year=billed_day,
+            hour=billed_hour,
+        )
 
         self.current_hour = hour
 
@@ -684,8 +696,15 @@ class SustainDC(gym.Env):
         # Populate observation dictionary based on updated states
         obs = self._populate_observation_dict()
 
+        # A truncation can end before the model reaches its calendar boundary;
+        # settle any pending billing-period charge before forming reward/info.
+        settlement = self.price_m.settle_pending_period() if terminal else PricingCharges(0.0, 0.0, 0.0)
+
         # Calculate rewards for all agents based on the updated state
-        reward_params = self._calculate_reward_params(workload, temp, ci_i, ci_i_future, day, hour, terminal)
+        reward_params = self._calculate_reward_params(
+            workload, temp, ci_i, ci_i_future, day, hour, terminal,
+            step_charges, settlement,
+        )
         self.ls_reward, self.dc_reward, self.bat_reward = self.calculate_reward(reward_params)
 
         # Update rewards, terminations, and truncations for each agent
@@ -773,8 +792,21 @@ class SustainDC(gym.Env):
         return obs
 
 
-    def _calculate_reward_params(self, workload, temp, ci_i, ci_i_future, day, hour, terminal):
+    def _calculate_reward_params(
+        self, workload, temp, ci_i, ci_i_future, day, hour, terminal,
+        step_charges=None, settlement=PricingCharges(0.0, 0.0, 0.0),
+    ):
         """Create the parameters needed to calculate rewards."""
+        if step_charges is None:
+            step_charges = PricingCharges(
+                self.price_m.get_energy_cost_this_step_c(),
+                self.price_m.get_demand_charge_increment_c(),
+                self.price_m.get_additional_charge_increment_c(),
+            )
+        energy_cost = step_charges.energy_cost_c + settlement.energy_cost_c
+        demand_cost = step_charges.demand_cost_increment_c + settlement.demand_cost_increment_c
+        additional_cost = step_charges.additional_cost_increment_c + settlement.additional_cost_increment_c
+        total_cost = energy_cost + demand_cost + additional_cost
         return {
             **self.bat_info, **self.ls_info, **self.dc_info,
             "outside_temp": temp, "day": day, "hour": hour,
@@ -782,9 +814,10 @@ class SustainDC(gym.Env):
             "isterminal": terminal,
             "norm_price": self.price_m.get_current_price(),
             "price_denorm_c_per_kwh": self.price_m.get_current_price_denorm(),
-            "energy_cost_this_step_c": self.price_m.get_energy_cost_this_step_c(),
-            "demand_charge_increment_c": self.price_m.get_demand_charge_increment_c(),
-            "optimization_charge_increment_c": self.price_m.get_optimization_charge_increment_c(),
+            "energy_cost_this_step_c": energy_cost,
+            "demand_charge_increment_c": demand_cost,
+            "additional_charge_increment_c": additional_cost,
+            "total_price_cost_this_step_c": total_cost,
         }
 
 

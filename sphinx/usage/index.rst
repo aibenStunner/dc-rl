@@ -22,4 +22,5 @@ In this section we will see how to modify the configuration files, external data
    customworkload
    customci
    customweather
+   custompricing
    customreward

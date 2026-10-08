@@ -39,6 +39,11 @@ _ENV_CONFIG = {
     "month": 6,
     "days_per_episode": 30,
     "bat_reward": "default_price_reward",
+    "pricing": {
+        "model": "hydro_quebec",
+        "config_file": "data/Pricing/hydro_quebec_2026.yaml",
+        "options": {"tariff": "auto", "demand_floor_kw": 0.0},
+    },
 }
 
 _env = None

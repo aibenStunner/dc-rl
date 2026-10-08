@@ -1,0 +1,7 @@
+schema_version: 1
+model: time_of_use
+metadata:
+  name: Example daily TOU
+  currency: CAD
+hourly_prices_c_per_kwh: [5, 5, 5, 5, 5, 5, 8, 8, 8, 8, 8, 8,
+                          6, 6, 6, 6, 9, 9, 9, 9, 6, 6, 5, 5]

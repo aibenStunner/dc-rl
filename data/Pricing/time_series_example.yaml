@@ -1,0 +1,9 @@
+schema_version: 1
+model: time_series
+metadata:
+  name: Example hourly market price
+  currency: CAD
+csv_file: data/Pricing/example_prices.csv
+price_column: price_c_per_kwh
+source_interval_minutes: 60
+wrap: true

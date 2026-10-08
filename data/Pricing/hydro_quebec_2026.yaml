@@ -1,0 +1,40 @@
+schema_version: 1
+model: hydro_quebec
+metadata:
+  name: Hydro-Québec 2026 electricity rates
+  currency: CAD
+  effective_date: "2026-04-01"
+  source: "https://www.hydroquebec.com/data/documents-donnees/pdf/electricity-rates.pdf"
+  winter:
+    start_day_of_year: 334
+    end_day_of_year: 89
+selection:
+  rate_l_threshold_kw: 5000.0
+rates:
+  rate_m:
+    approved: true
+    citation: Chapter 4, Section 1, articles 4.1-4.8
+    energy_tier1_c_per_kwh: 6.292
+    energy_tier2_c_per_kwh: 4.666
+    tier2_threshold_kwh: 210000.0
+    demand_charge_c_per_kw_month: 1824.2
+    minimum_billing_demand_kw: 0.0
+    winter_ratchet_fraction: 0.65
+    minimum_bill_c_1phase: 1542.6
+    minimum_bill_c_3phase: 4627.8
+  rate_l:
+    approved: true
+    citation: Chapter 5, Section 1, articles 5.1-5.9
+    energy_price_c_per_kwh: 3.821
+    demand_charge_c_per_kw_month: 1502.7
+    minimum_billing_demand_kw: 5000.0
+    optimization_charge_c_per_kw_day: 880.8
+    optimization_charge_cap_c_per_kw_month: 2642.0
+    optimization_overrun_fraction: 1.10
+  new_dc_rate:
+    approved: false
+    approximate: true
+    citation: Hydro-Québec press release, pending Régie approval
+    energy_price_c_per_kwh: 13.0
+    demand_charge_c_per_kw_month: 0.0
+    minimum_billing_demand_kw: 5000.0
