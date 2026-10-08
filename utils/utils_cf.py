@@ -20,7 +20,9 @@ def obtain_paths(location):
     Returns:
         List[string]: Naming for the data files
     """
-    if 'az' in location.lower():
+    if 'montreal' in location.lower() or 'qc' in location.lower() or 'quebec' in location.lower():
+        return ['QC', 'CAN_QC_Montreal-Trudeau.Intl.AP.716270_TMYx.2011-2025.epw']
+    elif 'az' in location.lower():
         return ['AZ', 'USA_AZ_Phoenix-Sky.Harbor.epw']
     elif 'ca' in location.lower():
         return ['CA', 'USA_CA_San.Jose-Mineta.epw']

@@ -2,7 +2,10 @@ agents:
   - agent_ls
   - agent_dc
   - agent_bat
-location: ca
+# Montréal–Trudeau TMYx built from 2011–2025 NCEI ISD / ERA5 data.
+# `location: montreal` selects this EPW; the explicit carbon file selects
+# Electricity Maps Québec direct operational carbon intensity.
+location: montreal
 cintensity_file: "QC_NG_&_avgCI.csv"
 workload_file: "Alibaba_CPU_Data_Hourly_1.csv"
 max_bat_cap_Mw: 1.0
