@@ -15,6 +15,46 @@ warnings.filterwarnings('ignore')
 # sys.path.insert(0, os.getcwd())
 
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
+from harl.utils.tracking import normalize_wandb_config
+
+
+def apply_wandb_overrides(algo_args, parsed_args):
+    """Merge explicit W&B flags into resolved logger configuration."""
+    logger_config = algo_args.setdefault("logger", {})
+    if not isinstance(logger_config, dict):
+        raise ValueError("algo_args.logger must be a mapping")
+    raw_config = dict(logger_config.get("wandb", {}))
+    flag_values = dict(parsed_args)
+
+    for flag, key in (
+        ("wandb_project", "project"),
+        ("wandb_entity", "entity"),
+        ("wandb_group", "group"),
+        ("wandb_tags", "tags"),
+    ):
+        if flag_values.get(flag) is not None:
+            raw_config[key] = flag_values[flag]
+    if flag_values.get("wandb_artifacts"):
+        raw_config["log_artifacts"] = True
+
+    mode = flag_values.get("wandb_mode")
+    if mode is not None:
+        raw_config["mode"] = mode
+        raw_config["enabled"] = mode != "disabled"
+    elif flag_values.get("wandb"):
+        raw_config["enabled"] = True
+        if raw_config.get("mode", "disabled") == "disabled":
+            raw_config["mode"] = "online"
+
+    logger_config["wandb"] = normalize_wandb_config({"wandb": raw_config})
+
+
+def run_and_close(runner):
+    """Run a runner and always close its local and optional tracking output."""
+    try:
+        runner.run()
+    finally:
+        runner.close()
 
 def main():
     """Main function to train the environment using the selected algorithm."""
@@ -61,7 +101,19 @@ def main():
         default="",
         help="If set, load existing experiment config file instead of reading from yaml config file."
     )
-    
+    parser.add_argument("--wandb", action="store_true", help="Enable W&B tracking.")
+    parser.add_argument(
+        "--wandb-mode", choices=("disabled", "offline", "online"),
+        help="W&B tracking mode.",
+    )
+    parser.add_argument("--wandb-project", help="W&B project name.")
+    parser.add_argument("--wandb-entity", help="Optional W&B entity.")
+    parser.add_argument("--wandb-group", help="Optional W&B run group.")
+    parser.add_argument("--wandb-tags", nargs="+", help="W&B run tags.")
+    parser.add_argument(
+        "--wandb-artifacts", action="store_true", help="Upload opt-in W&B artifacts."
+    )
+
     # Parse known arguments and process unknown arguments
     args, unparsed_args = parser.parse_known_args()
 
@@ -95,14 +147,14 @@ def main():
 
     # Update args from command line
     update_args(unparsed_dict, algo_args, env_args)
+    apply_wandb_overrides(algo_args, args)
 
     # Start training
     from harl.runners import RUNNER_REGISTRY
 
     # Initialize and run the selected algorithm
     runner = RUNNER_REGISTRY[args["algo"]](args, algo_args, env_args)
-    runner.run()
-    runner.close()
+    run_and_close(runner)
 
 
 if __name__ == "__main__":

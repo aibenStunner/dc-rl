@@ -25,6 +25,15 @@ installed in the `thesis-dcrl` env. Tests are plain `test_*` functions
 collected by `tests/_harness.py`. `pytest tests/` also works if you ever
 install it (`tests/conftest.py` handles the import path).
 
+## Optional W&B tracking
+
+The default training path remains local TensorBoard plus run-directory outputs
+and does not import W&B at runtime. W&B is installed with the normal
+`requirements.txt` environment, then use `--wandb --wandb-mode offline` to write a local offline W&B run beside the
+normal result files, or `--wandb --wandb-mode online` only after configuring
+W&B authentication outside this repository. Never put credentials in YAML or
+saved experiment configuration.
+
 ## Adding a test module
 
 Create `tests/test_<thing>.py`:
@@ -76,7 +85,19 @@ Conventions worth keeping:
 | `test_observation_layout.py` | Observation vector and shared-critic layout stability |
 | `test_battery_efficiency.py` | Efficiency-aware bus/cell flows, round-trip energy, grid meter identity, initial SoC reset, throughput degradation reporting, and battery config propagation |
 | `test_team_tariff_reward.py` | Experiment 1 shared tariff components, targeted safeguards, configuration validation, and legacy reward preservation |
-| `test_harl_reward_delivery.py` | EP reward-contract rejection, FP per-agent return preservation, and FP critic agent identity |
+| `test_harl_reward_delivery.py` | EP reward-contract rejection, FP per-agent return preservation, per-agent completed-return aliases, and FP critic agent identity |
+| `test_tracking.py` | Optional W&B configuration, lazy disabled path, dual-writer mirroring, lifecycle cleanup, artifacts, and YAML defaults |
+| `test_sustaindc_metrics.py` | Facility-level tariff/reward/PV/SLA/thermal aggregation, cadence, evaluation summaries, and full trace CSVs |
 | `test_pv_manager.py` | pvlib Montréal EPW parsing, fixed-tilt AC production, capacity scaling, hourly-to-quarter-hour energy conservation, and PV/grid meter balance |
+
+## Metric cadence
+
+`train/update/*` contains optimizer information; `train/rollout/*` contains one
+HARL collection window and is **not** necessarily a 30-day physical episode;
+`eval/episode/*` is emitted only for a naturally completed SustainDC evaluation
+episode; and `eval/aggregate/*` summarizes completed evaluation episodes. Full
+15-minute evaluation traces are stored as local CSVs and can be optional W&B
+artifacts. The tariff/reward decomposition always uses one merged facility
+record per environment step, never one copy per agent.
 
 Experiment 1 uses independent 30-day episode accounting for training and initial evaluation. It is not a contiguous headline utility-bill reconstruction.

@@ -54,8 +54,19 @@ def get_task_name(env, env_args):
     return task
 
 
-def init_dir(env, env_args, algo, exp_name, seed, logger_path):
-    """Init directory for saving results."""
+def init_dir(
+    env,
+    env_args,
+    algo,
+    exp_name,
+    seed,
+    logger_path,
+    *,
+    main_args=None,
+    algo_args=None,
+    job_type="train",
+):
+    """Init directory for saving results and optional tracking state."""
     task = get_task_name(env, env_args)
     hms_time = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     results_path = os.path.join(
@@ -71,6 +82,17 @@ def init_dir(env, env_args, algo, exp_name, seed, logger_path):
     from tensorboardX import SummaryWriter
 
     writter = SummaryWriter(log_path)
+    if main_args is not None and algo_args is not None:
+        from harl.utils.tracking import create_tracking_writer
+
+        writter = create_tracking_writer(
+            tensorboard_writer=writter,
+            run_dir=results_path,
+            main_args=main_args,
+            algo_args=algo_args,
+            env_args=env_args,
+            job_type=job_type,
+        )
     models_path = os.path.join(results_path, "models")
     os.makedirs(models_path, exist_ok=True)
     return results_path, log_path, models_path, writter

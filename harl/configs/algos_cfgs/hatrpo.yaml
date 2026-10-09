@@ -121,3 +121,13 @@ algo:
 logger:
   # logging directory
   log_dir: "./results"
+  wandb:
+    enabled: false
+    mode: disabled
+    project: sustaindc-thesis
+    entity: null
+    group: null
+    tags: []
+    log_artifacts: false
+    artifact_aliases: [latest]
+    failure_policy: local_only

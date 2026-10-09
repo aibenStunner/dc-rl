@@ -12,6 +12,7 @@ from tests._harness import run_module_tests
 from harl.common.buffers.on_policy_critic_buffer_fp import OnPolicyCriticBufferFP
 from harl.envs.sustaindc.harlsustaindc_env import fp_critic_observations
 from harl.runners.on_policy_base_runner import select_ep_team_rewards
+from harl.common.base_logger import BaseLogger
 
 
 def test_ep_rejects_heterogeneous_rewards_and_accepts_equal_rewards():
@@ -44,6 +45,48 @@ def test_fp_critic_observations_append_one_hot_agent_identity():
             dtype=np.float32,
         ),
     )
+
+
+class _Writer:
+    def __init__(self):
+        self.scalars = []
+
+    def add_scalar(self, tag, value, step):
+        self.scalars.append((tag, value, step))
+
+
+class _Logger(BaseLogger):
+    def get_task_name(self):
+        return "test"
+
+
+class _CriticBuffer:
+    def get_mean_rewards(self):
+        return 0.0
+
+
+def test_base_logger_keeps_completed_agent_returns_distinct():
+    writer = _Writer()
+    logger = _Logger(
+        {"env": "sustaindc", "algo": "happo", "exp_name": "test"},
+        {"train": {"n_rollout_threads": 1, "episode_length": 1, "num_env_steps": 1}},
+        {}, 3, writer, ".",
+    )
+    logger.init(1)
+    logger.episode_init(1)
+    logger.per_step((
+        None, None,
+        np.array([[[-4.0], [-3.0], [-2.0]]], dtype=np.float32),
+        np.ones((1, 3, 1), dtype=bool),
+        None, None, None, None, None, None, None,
+    ))
+    logger.episode_log([{}, {}, {}], {}, None, _CriticBuffer())
+    values = {tag: value for tag, value, _ in writer.scalars}
+    assert values["train/episode/reward/agent_ls/return"] == -4.0
+    assert values["train/episode/reward/agent_dc/return"] == -3.0
+    assert values["train/episode/reward/agent_bat/return"] == -2.0
+    assert values["train/episode/reward/mean_across_agents/return"] == -3.0
+    logger.close()
 
 
 def test_fp_buffer_preserves_distinct_agent_reward_columns():

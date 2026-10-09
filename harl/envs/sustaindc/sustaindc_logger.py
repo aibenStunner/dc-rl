@@ -1,4 +1,8 @@
 from harl.common.base_logger import BaseLogger
+from harl.envs.sustaindc.metrics import (
+    FacilityMetricAccumulator,
+    aggregate_metric_snapshots,
+)
 
 import numpy as np
 
@@ -8,8 +12,12 @@ class SustainDCLogger(BaseLogger):
         super().__init__(args, algo_args, env_args, num_agents, writter, run_dir)
         
         self.avg_eval_episode_reward = 0.0
-    
-    
+        self.rollout_metrics = None
+        self.eval_thread_metrics = []
+        self.eval_episode_snapshots = []
+        self.eval_event = 0
+
+
     def get_task_name(self):
         """Specific implementation to return the task name based on the environment args."""
         return f"{self.env_args['location']}-discrete"
@@ -36,6 +44,11 @@ class SustainDCLogger(BaseLogger):
             'PUE': 0,
         }
         self.is_off_policy = False
+        self.rollout_metrics = FacilityMetricAccumulator(
+            "train/rollout",
+            targeted_mode=self.env_args.get("reward", {}).get("mode")
+            == "team_tariff_targeted_safeguards",
+        )
 
     def eval_init(self):
         """Initialize metrics at the beginning of each episode."""
@@ -59,7 +72,17 @@ class SustainDCLogger(BaseLogger):
             'PUE': 0,
         }
         self.is_off_policy = False
-        
+        self.eval_event += 1
+        self.eval_episode_snapshots = []
+        self.eval_thread_metrics = [
+            FacilityMetricAccumulator(
+                "eval/episode",
+                targeted_mode=self.env_args.get("reward", {}).get("mode")
+                == "team_tariff_targeted_safeguards",
+            )
+            for _ in range(self.algo_args["eval"]["n_eval_rollout_threads"])
+        ]
+
     def eval_init_off_policy(self, total_num_steps):
         """Initialize metrics at the beginning of each episode."""
         super().eval_init_off_policy(total_num_steps)
@@ -82,7 +105,17 @@ class SustainDCLogger(BaseLogger):
             'PUE': 0,
         }
         self.is_off_policy = True
-        
+        self.eval_event += 1
+        self.eval_episode_snapshots = []
+        self.eval_thread_metrics = [
+            FacilityMetricAccumulator(
+                "eval/episode",
+                targeted_mode=self.env_args.get("reward", {}).get("mode")
+                == "team_tariff_targeted_safeguards",
+            )
+            for _ in range(self.algo_args["eval"]["n_eval_rollout_threads"])
+        ]
+
     def per_step(self, data):
         """Capture and update metrics per step."""
         super().per_step(data)
@@ -107,6 +140,8 @@ class SustainDCLogger(BaseLogger):
                 self.metrics["hvac_power_on_used"].append(infos[i][0].get("dc_HVAC_total_power_kW", 0))
 
             self.metrics["step_count"] += 1
+            if self.rollout_metrics is not None:
+                self.rollout_metrics.add(infos[i][0])
 
     def eval_per_step(self, eval_data):
         """Capture and update metrics per step during evaluation."""
@@ -131,12 +166,22 @@ class SustainDCLogger(BaseLogger):
                 self.eval_metrics["hvac_power_on_used"].append(eval_infos[i][0].get("dc_HVAC_total_power_kW", 0))
             
             self.eval_metrics["step_count"] += 1
+            if i < len(self.eval_thread_metrics):
+                self.eval_thread_metrics[i].add(eval_infos[i][0])
 
 
     def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
         """Calculate and log metrics at the end of the episode."""
         super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
-        
+        if self.rollout_metrics is not None:
+            canonical_metrics = self.rollout_metrics.snapshot()
+            if hasattr(self.writter, "log_metrics"):
+                self.writter.log_metrics(canonical_metrics, self.total_num_steps)
+            else:
+                for tag, value in canonical_metrics.items():
+                    self.writter.add_scalar(tag, value, self.total_num_steps)
+            self.rollout_metrics.reset()
+
         if self.metrics["step_count"] > 0:
             average_net_energy = self.metrics["net_energy_sum"] / self.metrics["step_count"]
             average_ite_power = self.metrics["ite_power_sum"] / self.metrics["step_count"]
@@ -202,10 +247,36 @@ class SustainDCLogger(BaseLogger):
             'hvac_power_on_used': []
         }
 
+    def eval_thread_done(self, tid):
+        """Finalize one naturally completed evaluation environment episode."""
+        super().eval_thread_done(tid)
+        if tid >= len(self.eval_thread_metrics):
+            return
+        snapshot = self.eval_thread_metrics[tid].snapshot()
+        snapshot["eval/episode/eval_event"] = float(self.eval_event)
+        snapshot["eval/episode/eval_thread"] = float(tid)
+        self.eval_episode_snapshots.append(snapshot)
+        if hasattr(self.writter, "log_metrics"):
+            self.writter.log_metrics(snapshot, self.total_num_steps)
+        else:
+            for tag, value in snapshot.items():
+                self.writter.add_scalar(tag, value, self.total_num_steps)
+        self.eval_thread_metrics[tid].reset()
+
     def eval_log(self, eval_episode):
         """Log evaluation information at the end of an evaluation session."""
         super().eval_log(eval_episode)
-        
+        if self.eval_episode_snapshots:
+            aggregate = aggregate_metric_snapshots(
+                self.eval_episode_snapshots, "eval/aggregate"
+            )
+            aggregate["eval/aggregate/eval_event"] = float(self.eval_event)
+            if hasattr(self.writter, "log_metrics"):
+                self.writter.log_metrics(aggregate, self.total_num_steps)
+            else:
+                for tag, value in aggregate.items():
+                    self.writter.add_scalar(tag, value, self.total_num_steps)
+
         if self.eval_metrics["step_count"] > 0:
             average_net_energy = self.eval_metrics["net_energy_sum"] / self.eval_metrics["step_count"]
             average_ite_power = self.eval_metrics["ite_power_sum"] / self.eval_metrics["step_count"]
@@ -275,6 +346,7 @@ class SustainDCLogger(BaseLogger):
 
         # add a method to return current average episode reward to decide whether to save the model
         self.avg_eval_episode_reward = np.mean(self.eval_episode_rewards)
+        self.eval_episode_snapshots = []
 
     def save_weights_log(self,):
         self.log_file.write("Saving model weights at episode {} with average episode reward {}\n".format(self.episode, self.avg_eval_episode_reward))

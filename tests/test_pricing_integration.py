@@ -176,6 +176,21 @@ def test_targeted_reward_mode_logs_reconcilable_agent_rewards():
     )
 
 
+def test_info_exposes_billed_clock_and_billing_state():
+    env = _make_env()
+    env.reset()
+    env.t_m.day = 333
+    env.t_m.hour = 23.75
+    env.current_hour = 23.75
+    _, _, _, _, info = env.step(_step_actions(env))
+    common = info["__common__"]
+    assert (common["billed_day"], common["billed_hour"]) == (333, 23.75)
+    assert (common["next_state_day"], common["next_state_hour"]) == (334, 0.0)
+    assert common["billing_period_energy_kwh"] >= 0.0
+    assert common["billing_running_peak_kw"] >= 0.0
+    assert 0.0 <= common["billing_progress_fraction"] <= 1.0
+
+
 def test_info_uses_model_neutral_charge_keys_only():
     env = _make_env()
     env.reset()

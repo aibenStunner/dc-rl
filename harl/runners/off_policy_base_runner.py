@@ -36,6 +36,7 @@ class OffPolicyBaseRunner:
         self.args = args
         self.algo_args = algo_args
         self.env_args = env_args
+        self._closed = False
 
         if "policy_freq" in self.algo_args["algo"]:
             self.policy_freq = self.algo_args["algo"]["policy_freq"]
@@ -57,6 +58,9 @@ class OffPolicyBaseRunner:
                 args["exp_name"],
                 algo_args["seed"]["seed"],
                 logger_path=algo_args["logger"]["log_dir"],
+                main_args=args,
+                algo_args=algo_args,
+                job_type=args.get("tracking_job_type", "train"),
             )
             save_config(args, algo_args, env_args, self.run_dir)
             self.log_file = open(
@@ -700,7 +704,10 @@ class OffPolicyBaseRunner:
             )
 
     def close(self):
-        """Close environment, writter, and log file."""
+        """Close environment, writter, and log file exactly once."""
+        if self._closed:
+            return
+        self._closed = True
         # post process
         if self.algo_args["render"]["use_render"]:
             self.envs.close()

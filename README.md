@@ -96,10 +96,16 @@ Refer to the [docs](https://hewlettpackard.github.io/dc-rl/) for broader documen
    python train_sustaindc.py --algo happo --exp_name happo 
    ```
 
-4. **Monitor training on Tensorboard**
+4. **Monitor training with TensorBoard (default)**
    ```bash
    tensorboard --logdir /results/sustaindc/<location>/happo
    ```
+
+   Optional W&B tracking preserves TensorBoard and local run files. It is
+   installed with the normal requirements, then use `--wandb --wandb-mode offline`
+   for a local syncable run or
+   `--wandb --wandb-mode online` after configuring W&B authentication. W&B is
+   disabled by default and credentials must not be added to configuration files.
 
 5. **Evaluation Example:**
    

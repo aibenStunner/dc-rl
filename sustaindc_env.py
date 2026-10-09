@@ -850,6 +850,7 @@ class SustainDC(gym.Env):
         reward_params = self._calculate_reward_params(
             workload, temp, ci_i, ci_i_future, day, hour, terminal,
             step_charges, settlement, terminal_soc_settlement,
+            billed_day=billed_day, billed_hour=billed_hour,
         )
         self.ls_reward, self.dc_reward, self.bat_reward = self.calculate_reward(reward_params)
 
@@ -976,7 +977,7 @@ class SustainDC(gym.Env):
     def _calculate_reward_params(
         self, workload, temp, ci_i, ci_i_future, day, hour, terminal,
         step_charges=None, settlement=PricingCharges(0.0, 0.0, 0.0),
-        terminal_soc_settlement=None,
+        terminal_soc_settlement=None, billed_day=None, billed_hour=None,
     ):
         """Create the parameters needed to calculate rewards."""
         if step_charges is None:
@@ -1002,6 +1003,14 @@ class SustainDC(gym.Env):
             "demand_charge_increment_c": demand_cost,
             "additional_charge_increment_c": additional_cost,
             "total_price_cost_this_step_c": total_cost,
+            "billed_day": billed_day if billed_day is not None else day,
+            "billed_hour": billed_hour if billed_hour is not None else hour,
+            "next_state_day": day,
+            "next_state_hour": hour,
+            "billing_running_peak_kw": self.price_m.state.running_peak_kw,
+            "billing_period_energy_kwh": self.price_m.state.billing_period_energy_kwh,
+            "billing_progress_fraction": self.price_m.get_billing_progress_fraction(),
+            "selected_tariff": getattr(self.price_m.model, "tariff", None),
         }
 
 

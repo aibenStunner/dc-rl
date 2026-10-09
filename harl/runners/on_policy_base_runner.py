@@ -23,7 +23,7 @@ from harl.utils.envs_tools import (
 from harl.utils.models_tools import init_device
 from harl.utils.configs_tools import init_dir, save_config
 from harl.envs import LOGGER_REGISTRY
-import time
+from harl.envs.sustaindc.metrics import build_trace_row, write_trace_csv
 
 
 def select_ep_team_rewards(rewards: np.ndarray, *, atol: float = 1e-7) -> np.ndarray:
@@ -52,6 +52,7 @@ class OnPolicyBaseRunner:
         self.args = args
         self.algo_args = algo_args
         self.env_args = env_args
+        self._closed = False
 
         self.hidden_sizes = algo_args["model"]["hidden_sizes"]
         self.rnn_hidden_size = self.hidden_sizes[-1]
@@ -66,6 +67,8 @@ class OnPolicyBaseRunner:
         
         self.dump_info = algo_args["eval"].get('dump_eval_metrcs', False)
         self.dump_render_info = algo_args["render"].get('dump_render_metrics', False)
+        self.eval_event = 0
+        self.completed_eval_trace_paths = []
         
         set_seed(algo_args["seed"])
         self.device = init_device(algo_args["device"])
@@ -77,6 +80,9 @@ class OnPolicyBaseRunner:
             args["exp_name"],
             algo_args["seed"]["seed"],
             logger_path=algo_args["logger"]["log_dir"],
+            main_args=args,
+            algo_args=algo_args,
+            job_type=args.get("tracking_job_type", "train"),
         )
         save_config(args, algo_args, env_args, self.run_dir)
         # set the title of the process
@@ -555,7 +561,15 @@ class OnPolicyBaseRunner:
     def eval(self):
         """Evaluate the model."""
         self.logger.eval_init()  # logger callback at the beginning of evaluation
+        self.eval_event += 1
         eval_episode = 0
+        trace_rows = []
+        trace_steps = np.zeros(
+            self.algo_args["eval"]["n_eval_rollout_threads"], dtype=int
+        )
+        trace_episode_ids = np.zeros(
+            self.algo_args["eval"]["n_eval_rollout_threads"], dtype=int
+        )
 
         update_chkpoints = False
         # Dictionary to store metrics for each agent across all episodes
@@ -619,6 +633,22 @@ class OnPolicyBaseRunner:
             self.logger.eval_per_step(
                 eval_data
             )  # logger callback at each step of evaluation
+            for eval_i in range(self.algo_args["eval"]["n_eval_rollout_threads"]):
+                terminal = bool(np.all(eval_dones[eval_i]))
+                trace_rows.append(build_trace_row(
+                    info=eval_infos[eval_i][0],
+                    actions=eval_actions[eval_i],
+                    run_metadata={
+                        "phase": "eval",
+                        "eval_event": self.eval_event,
+                        "physical_episode_id": int(trace_episode_ids[eval_i]),
+                        "env_thread": eval_i,
+                        "step_in_episode": int(trace_steps[eval_i]),
+                    },
+                    terminal=terminal,
+                    truncated=terminal,
+                ))
+                trace_steps[eval_i] += 1
 
             if self.dump_info:
                 for i in range(self.algo_args["eval"]["n_eval_rollout_threads"]):
@@ -688,6 +718,8 @@ class OnPolicyBaseRunner:
                     self.logger.eval_thread_done(
                         eval_i
                     )  # logger callback when an episode is done
+                    trace_episode_ids[eval_i] += 1
+                    trace_steps[eval_i] = 0
 
             if eval_episode >= self.algo_args["eval"]["eval_episodes"]:
                 self.logger.eval_log(
@@ -708,10 +740,26 @@ class OnPolicyBaseRunner:
         #         print(f"{agent_key} {metric_key} - Mean: {mean_metric}, Std: {std_metric}")
 
         if self.dump_info:
-            # Convert collected data to DataFrame and save as CSV
+            # Preserve the legacy rounded compatibility export and add a full trace.
             self.dump_metrics_to_csv(metrics, eval_episode)
+            trace_path = write_trace_csv(
+                trace_rows,
+                os.path.join(
+                    self.run_dir,
+                    "evaluation_data",
+                    f"eval_event-{self.eval_event}-trace.csv",
+                ),
+            )
+            self.completed_eval_trace_paths.append(trace_path)
+            self.writter.log_artifact(
+                f"{os.path.basename(self.run_dir)}-evaluation-{self.eval_event}",
+                "sustaindc-evaluation",
+                [trace_path, os.path.join(self.run_dir, "config.json"),
+                 os.path.join(self.run_dir, "tracking_status.json")],
+                aliases=("latest",),
+            )
             print("Data saved to evaluation_data.csv.")
-            
+
         return update_chkpoints
 
 
@@ -953,6 +1001,26 @@ class OnPolicyBaseRunner:
                 str(self.save_dir) + "/value_normalizer" + ".pt",
             )
         self.logger.save_weights_log()
+        artifact_paths = [
+            os.path.join(self.run_dir, "config.json"),
+            os.path.join(self.run_dir, "tracking_status.json"),
+            os.path.join(self.log_dir, "summary.json"),
+            *self.completed_eval_trace_paths,
+        ]
+        artifact_paths.extend(
+            os.path.join(self.save_dir, filename)
+            for filename in os.listdir(self.save_dir)
+            if filename.endswith(".pt")
+        )
+        aliases = ["latest"]
+        if self.update_chkpoints:
+            aliases.append("best")
+        self.writter.log_artifact(
+            f"{os.path.basename(self.run_dir)}-checkpoint",
+            "sustaindc-checkpoint",
+            artifact_paths,
+            aliases=aliases,
+        )
 
     def restore(self):
         """Restore model parameters."""
@@ -978,7 +1046,10 @@ class OnPolicyBaseRunner:
                 self.value_normalizer.load_state_dict(value_normalizer_state_dict)
 
     def close(self):
-        """Close environment, writter, and logger."""
+        """Close environment, writter, and logger exactly once."""
+        if self._closed:
+            return
+        self._closed = True
         if self.algo_args["render"]["use_render"]:
             self.envs.close()
         else:

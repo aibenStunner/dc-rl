@@ -34,7 +34,11 @@ class BaseLogger:
         self.train_episode_rewards = np.zeros(
             self.algo_args["train"]["n_rollout_threads"]
         )
+        self.train_episode_agent_rewards = np.zeros(
+            (self.algo_args["train"]["n_rollout_threads"], self.num_agents)
+        )
         self.done_episodes_rewards = []
+        self.done_agent_episode_rewards = []
 
     def episode_init(self, episode):
         """Initialize the logger for each episode."""
@@ -58,10 +62,15 @@ class BaseLogger:
         dones_env = np.all(dones, axis=1)
         reward_env = np.mean(rewards, axis=1).flatten()
         self.train_episode_rewards += reward_env
+        self.train_episode_agent_rewards += rewards[:, :, 0]
         for t in range(self.algo_args["train"]["n_rollout_threads"]):
             if dones_env[t]:
                 self.done_episodes_rewards.append(self.train_episode_rewards[t])
+                self.done_agent_episode_rewards.append(
+                    self.train_episode_agent_rewards[t].copy()
+                )
                 self.train_episode_rewards[t] = 0
+                self.train_episode_agent_rewards[t] = 0
 
     def episode_log(
         self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer
@@ -89,6 +98,21 @@ class BaseLogger:
 
         critic_train_info["average_step_rewards"] = critic_buffer.get_mean_rewards()
         self.log_train(actor_train_infos, critic_train_info)
+        agent_names = ("ls", "dc", "bat")
+        for agent_id in range(self.num_agents):
+            for key, value in actor_train_infos[agent_id].items():
+                self.writter.add_scalar(
+                    f"train/update/actor/{agent_names[agent_id]}/{key}",
+                    value,
+                    self.total_num_steps,
+                )
+        for key, value in critic_train_info.items():
+            self.writter.add_scalar(
+                f"train/update/critic/{key}", value, self.total_num_steps
+            )
+        self.writter.add_scalar(
+            "train/update/global_env_step", self.total_num_steps, self.total_num_steps
+        )
 
         print(
             "Average step reward is {}.".format(
@@ -104,6 +128,19 @@ class BaseLogger:
                 )
             )
             self.writter.add_scalar("train/average_step_rewards", aver_episode_rewards, self.total_num_steps)
+            agent_names = ("agent_ls", "agent_dc", "agent_bat")
+            completed_returns = np.asarray(self.done_agent_episode_rewards)
+            for agent_id in range(min(self.num_agents, len(agent_names))):
+                self.writter.add_scalar(
+                    f"train/episode/reward/{agent_names[agent_id]}/return",
+                    np.mean(completed_returns[:, agent_id]),
+                    self.total_num_steps,
+                )
+            self.writter.add_scalar(
+                "train/episode/reward/mean_across_agents/return",
+                np.mean(completed_returns),
+                self.total_num_steps,
+            )
 
             # self.writter.add_scalars(
             #     "train/train_episode_rewards",
@@ -111,6 +148,7 @@ class BaseLogger:
             #     self.total_num_steps,
             # )
             self.done_episodes_rewards = []
+            self.done_agent_episode_rewards = []
 
     def eval_init(self):
         """Initialize the logger for evaluation."""

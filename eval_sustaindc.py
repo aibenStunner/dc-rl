@@ -8,6 +8,7 @@ warnings.filterwarnings('ignore')
 sys.path.insert(0,os.getcwd())  # or sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), os.pardir, 'heterogeneous_sustaindc')))
 from harl.runners import RUNNER_REGISTRY
 from harl.utils.trans_tools import _t2n
+from harl.utils.tracking import normalize_wandb_config
 
 # sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), os.pardir, 'dc-rl')))
 from utils.base_agents import BaseLoadShiftingAgent, BaseHVACAgent, BaseBatteryAgent
@@ -20,6 +21,7 @@ AGENT_TYPE = "haa2c"
 RUN = "seed-00001-2024-06-04-20-41-56"
 ACTIVE_AGENTS = ['agent_ls', 'agent_dc', 'agent_bat']
 NUM_EVAL_EPISODES = 1
+ENABLE_WANDB_EVAL = False
 
 # load trained algo and env configs
 with open(os.path.join(MODEL_PATH, ENV, LOCATION, AGENT_TYPE, AGENT_TYPE+"3agents",RUN,'config.json'), encoding='utf-8') as file:
@@ -38,6 +40,16 @@ algo_args["logger"]["log_dir"] = SAVE_EVAL
 algo_args["eval"]["eval_episodes"] = NUM_EVAL_EPISODES
 # save evaluation results
 algo_args["eval"]["dump_eval_metrcs"] = True
+if ENABLE_WANDB_EVAL:
+    wandb_config = normalize_wandb_config(algo_args.get("logger", {}))
+    wandb_config["enabled"] = True
+    if wandb_config["mode"] == "disabled":
+        wandb_config["mode"] = "online"
+    algo_args["logger"]["wandb"] = wandb_config
+    main_args["tracking_job_type"] = "eval"
+    main_args["exp_name"] = f"{main_args['exp_name']}-eval"
+else:
+    algo_args.setdefault("logger", {})["wandb"] = normalize_wandb_config({})
 
 # initialize the actors and environments with the chosen configurations
 expt_runner = RUNNER_REGISTRY[main_args["algo"]](main_args, algo_args, env_args)
