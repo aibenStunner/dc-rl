@@ -305,6 +305,13 @@ class OnPolicyBaseRunner:
 
             actor_train_infos, critic_train_info = self.train()
 
+            # Facility metrics for every episode. This is deliberately
+            # outside the log_interval gate below: episode_log only runs
+            # every log_interval episodes, so gating this too would discard
+            # the facility metrics of the other episodes.
+            if hasattr(self.logger, "episode_metrics_log"):
+                self.logger.episode_metrics_log()
+
             # log information
             if episode % self.algo_args["train"]["log_interval"] == 0:
                 self.logger.episode_log(

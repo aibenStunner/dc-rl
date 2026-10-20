@@ -104,6 +104,150 @@ def _finite_real(value: object) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
 
+# ---------------------------------------------------------------------------
+# Console summary
+#
+# The canonical metric set is deliberately broad (it is the tracking surface
+# for W&B and TensorBoard). The console needs a small, stable, human-readable
+# selection instead, so a run can be judged from its log without opening a
+# dashboard. Each entry maps a canonical metric suffix to a short label and a
+# unit; the suffix is matched against the snapshot *after* the namespace
+# prefix is stripped.
+# ---------------------------------------------------------------------------
+
+CONSOLE_SUMMARY_GROUPS: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
+    (
+        "tariff",
+        "Tariff",
+        (
+            ("tariff/cost/total_c", "cost", "c"),
+            ("tariff/cost/demand_increment_c", "demand", "c"),
+            ("tariff/billing/running_peak_kw", "peak", "kW"),
+            ("tariff/price_c_per_kwh", "price", "c/kWh"),
+        ),
+    ),
+    (
+        "energy",
+        "Energy",
+        (
+            ("energy/grid_import_kwh", "grid", "kWh"),
+            ("energy/baseline_without_battery_kwh", "no-bat", "kWh"),
+            ("energy/battery_delta_kwh", "bat-delta", "kWh"),
+            ("pv/generation_ac_kwh", "pv", "kWh"),
+            ("pv/curtailment_fraction", "pv-curtailed", ""),
+        ),
+    ),
+    (
+        "workload",
+        "Workload",
+        (
+            ("workload/original_fraction/mean", "orig", ""),
+            ("workload/shifted_fraction/mean", "shifted", ""),
+            ("sla/queue_depth/max", "queue-max", ""),
+            ("sla/queue_depth/final", "queue-end", ""),
+            ("sla/dropped_tasks", "dropped", ""),
+            ("sla/overdue_tasks/sum", "overdue", ""),
+        ),
+    ),
+    (
+        "thermal",
+        "Thermal",
+        (
+            ("thermal/internal_temperature_c/mean", "int", "C"),
+            ("thermal/ambient_temperature_c/mean", "amb", "C"),
+            ("thermal/temperature_margin_c/min", "margin-min", "C"),
+            ("thermal/constraint_violation_steps", "clamp-steps", ""),
+        ),
+    ),
+    (
+        "battery",
+        "Battery",
+        (
+            ("battery/soc/start", "soc-start", ""),
+            ("battery/soc/end", "soc-end", ""),
+            ("battery/action/charge_steps", "charge", "steps"),
+            ("battery/action/discharge_steps", "discharge", "steps"),
+            ("battery/cell_throughput_kwh", "throughput", "kWh"),
+            ("battery/degradation_cost_c", "degradation", "c"),
+        ),
+    ),
+    (
+        "carbon",
+        "Carbon/Water",
+        (
+            ("carbon/emissions", "co2", "kg"),
+            ("carbon/grid_intensity", "CI", "g/kWh"),
+            ("water/liters", "water", "L"),
+        ),
+    ),
+    (
+        "reward",
+        "Reward",
+        (
+            ("reward/shared_tariff_reward/sum", "tariff-r", ""),
+            ("reward/agent_ls/sum", "ls", ""),
+            ("reward/agent_dc/sum", "dc", ""),
+            ("reward/agent_bat/sum", "bat", ""),
+            ("reward/penalty/ls_overdue/sum", "ls-overdue", ""),
+            ("reward/penalty/ls_dropped/sum", "ls-dropped", ""),
+            ("reward/penalty/dc_thermal/sum", "dc-thermal", ""),
+            ("reward/penalty/battery_terminal_soc/sum", "bat-soc", ""),
+        ),
+    ),
+)
+
+
+def strip_namespace(snapshot: Mapping[str, object], namespace: str) -> dict[str, float]:
+    """Return the snapshot's numeric entries with `namespace` stripped.
+
+    Keys outside the namespace, and non-finite values, are dropped so the
+    result can be keyed by canonical suffix.
+    """
+    prefix = namespace.rstrip("/") + "/"
+    result: dict[str, float] = {}
+    for key, value in snapshot.items():
+        if not key.startswith(prefix):
+            continue
+        if _finite_real(value):
+            result[key[len(prefix):]] = float(value)
+    return result
+
+
+def _format_console_value(value: float, unit: str) -> str:
+    if unit == "":
+        if abs(value) >= 100:
+            return f"{value:.0f}"
+        if abs(value) >= 1:
+            return f"{value:.2f}"
+        return f"{value:.3f}"
+    if abs(value) >= 100:
+        return f"{value:.0f}{unit}"
+    return f"{value:.2f}{unit}"
+
+
+def format_console_summary(
+    snapshot: Mapping[str, object],
+    namespace: str,
+    groups: Sequence[tuple[str, str, tuple[tuple[str, str, str], ...]]] = CONSOLE_SUMMARY_GROUPS,
+) -> str:
+    """Render a curated, human-readable summary of a metric snapshot.
+
+    Only the configured suffixes are shown, and only when the snapshot
+    actually contains them, so a summary never invents a value.
+    """
+    values = strip_namespace(snapshot, namespace)
+    lines: list[str] = []
+    for _, title, entries in groups:
+        parts: list[str] = []
+        for suffix, label, unit in entries:
+            if suffix not in values:
+                continue
+            parts.append(f"{label}={_format_console_value(values[suffix], unit)}")
+        if parts:
+            lines.append(f"  {title:<13} " + "  ".join(parts))
+    return "\n".join(lines)
+
+
 class FacilityMetricAccumulator:
     """Aggregate one complete facility info dictionary per simulator step."""
 

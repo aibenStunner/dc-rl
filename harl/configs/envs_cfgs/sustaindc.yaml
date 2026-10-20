@@ -68,3 +68,12 @@ month: 6
 days_per_episode: 30
 partial_obs: True
 nonoverlapping_shared_obs_space: True
+
+# Console verbosity for the training log:
+#   "off"     -- no per-episode facility summary
+#   "summary" -- curated headline metrics per episode (default)
+#   "full"    -- curated summary plus the legacy per-episode averages
+# This only affects console output. The full metric set is always written to
+# W&B and TensorBoard under the train/episode/* and train/interval/*
+# namespaces regardless of this setting.
+console_verbosity: summary

@@ -200,12 +200,108 @@ def test_rollout_logging_keeps_targeted_returns_separate():
         infos=[[_info(agent_ls_reward=-4.0, agent_dc_reward=-3.0, agent_bat_reward=-2.0)] * 3],
         dones=np.zeros((1, 3, 1), dtype=bool),
     ))
+    logger.episode_metrics_log()
     logger.episode_log([{}, {}, {}], {}, None, FakeCriticBuffer())
-    logged = logger.writter.metric_rows[-1][0]
-    assert logged["train/rollout/reward/agent_ls/sum"] == -4.0
-    assert logged["train/rollout/reward/agent_dc/sum"] == -3.0
-    assert logged["train/rollout/reward/agent_bat/sum"] == -2.0
-    assert "train/episode/reward/agent_ls/sum" not in logged
+
+    episode_rows = [
+        row for row, _ in logger.writter.metric_rows
+        if "train/episode/reward/agent_ls/sum" in row
+    ]
+    assert len(episode_rows) == 1
+    logged = episode_rows[0]
+    assert logged["train/episode/reward/agent_ls/sum"] == -4.0
+    assert logged["train/episode/reward/agent_dc/sum"] == -3.0
+    assert logged["train/episode/reward/agent_bat/sum"] == -2.0
+
+    # The interval namespace carries the same per-agent separation.
+    interval_rows = [
+        row for row, _ in logger.writter.metric_rows
+        if "train/interval/reward/agent_ls/sum" in row
+    ]
+    assert len(interval_rows) == 1
+    assert interval_rows[0]["train/interval/reward/agent_ls/sum"] == -4.0
+    assert interval_rows[0]["train/interval/reward/agent_dc/sum"] == -3.0
+    assert interval_rows[0]["train/interval/reward/agent_bat/sum"] == -2.0
+
+
+def test_episode_metrics_are_retained_for_every_episode_not_only_logged_ones():
+    """episode_log runs only every log_interval episodes; facility metrics
+    must still be captured for the episodes in between."""
+    logger = _logger_with_fake_writer()
+    logger.init(episodes=3)
+    for episode in (1, 2, 3):
+        logger.episode_init(episode)
+        logger.per_step(_training_data(
+            rewards=np.array([[[-4.0], [-3.0], [-2.0]]], dtype=np.float32),
+            infos=[[_info(total_price_cost_this_step_c=10.0 * episode)] * 3],
+            dones=np.zeros((1, 3, 1), dtype=bool),
+        ))
+        logger.episode_metrics_log()
+
+    episode_rows = [
+        row for row, _ in logger.writter.metric_rows
+        if "train/episode/tariff/cost/total_c" in row
+    ]
+    assert len(episode_rows) == 3
+    assert [r["train/episode/tariff/cost/total_c"] for r in episode_rows] == [10.0, 20.0, 30.0]
+
+
+def test_interval_metrics_accumulate_and_reset_on_demand():
+    logger = _logger_with_fake_writer()
+    logger.init(episodes=3)
+    for episode in (1, 2, 3):
+        logger.episode_init(episode)
+        logger.per_step(_training_data(
+            rewards=np.array([[[-4.0], [-3.0], [-2.0]]], dtype=np.float32),
+            infos=[[_info(total_price_cost_this_step_c=10.0)] * 3],
+            dones=np.zeros((1, 3, 1), dtype=bool),
+        ))
+        logger.episode_metrics_log()
+
+    interval_rows = [
+        row for row, _ in logger.writter.metric_rows
+        if "train/interval/tariff/cost/total_c" in row
+    ]
+    assert [r["train/interval/tariff/cost/total_c"] for r in interval_rows] == [10.0, 20.0, 30.0]
+
+    logger.reset_interval_metrics()
+    logger.episode_init(4)
+    logger.per_step(_training_data(
+        rewards=np.array([[[-4.0], [-3.0], [-2.0]]], dtype=np.float32),
+        infos=[[_info(total_price_cost_this_step_c=5.0)] * 3],
+        dones=np.zeros((1, 3, 1), dtype=bool),
+    ))
+    logger.episode_metrics_log()
+    interval_rows = [
+        row for row, _ in logger.writter.metric_rows
+        if "train/interval/tariff/cost/total_c" in row
+    ]
+    assert interval_rows[-1]["train/interval/tariff/cost/total_c"] == 5.0
+
+
+def test_console_summary_reports_curated_headline_metrics():
+    logger = _logger_with_fake_writer()
+    logger.init(episodes=1)
+    logger.episode_init(1)
+    logger.per_step(_training_data(
+        rewards=np.array([[[-4.0], [-3.0], [-2.0]]], dtype=np.float32),
+        infos=[[_info(
+            total_price_cost_this_step_c=250.0,
+            billing_running_peak_kw=890.0,
+            bat_grid_import_kwh=12.0,
+            ls_tasks_in_queue=4.0,
+            dc_int_temperature=21.5,
+            dc_exterior_ambient_temp=18.0,
+            agent_ls_reward=-4.0,
+        )] * 3],
+        dones=np.zeros((1, 3, 1), dtype=bool),
+    ))
+    text = logger.console_summary_text()
+    assert "Tariff" in text
+    assert "890" in text
+    assert "queue-max" in text
+    assert "21.50C" in text
+    assert "18.00C" in text
 
 
 def test_trace_row_retains_billing_and_next_state_clocks():

@@ -2,20 +2,25 @@ from harl.common.base_logger import BaseLogger
 from harl.envs.sustaindc.metrics import (
     FacilityMetricAccumulator,
     aggregate_metric_snapshots,
+    format_console_summary,
 )
 
 import numpy as np
 
 class SustainDCLogger(BaseLogger):
-    
+
     def __init__(self, args, algo_args, env_args, num_agents, writter, run_dir):
         super().__init__(args, algo_args, env_args, num_agents, writter, run_dir)
-        
+
         self.avg_eval_episode_reward = 0.0
         self.rollout_metrics = None
+        self.interval_metrics = None
         self.eval_thread_metrics = []
         self.eval_episode_snapshots = []
         self.eval_event = 0
+
+        # Console verbosity: "off", "summary" (default) or "full".
+        self.console_verbosity = self.env_args.get("console_verbosity", "summary")
 
 
     def get_task_name(self):
@@ -25,6 +30,13 @@ class SustainDCLogger(BaseLogger):
     def episode_init(self, episode):
         """Initialize metrics at the beginning of each episode."""
         super().episode_init(episode)
+        # base_logger.episode_log recomputes this, but episode_metrics_log
+        # runs before that, so it must already be available here.
+        self.total_num_steps = (
+            episode
+            * self.algo_args["train"]["episode_length"]
+            * self.algo_args["train"]["n_rollout_threads"]
+        )
         self.metrics = {
             "net_energy_sum": 0,
             "pv_generation_sum": 0,
@@ -44,11 +56,23 @@ class SustainDCLogger(BaseLogger):
             'PUE': 0,
         }
         self.is_off_policy = False
-        self.rollout_metrics = FacilityMetricAccumulator(
-            "train/rollout",
-            targeted_mode=self.env_args.get("reward", {}).get("mode")
-            == "team_tariff_targeted_safeguards",
+        targeted_mode = (
+            self.env_args.get("reward", {}).get("mode")
+            == "team_tariff_targeted_safeguards"
         )
+        # Per-episode accumulator. Rebuilt every episode so one episode's
+        # facility metrics are always attributable to that episode.
+        self.rollout_metrics = FacilityMetricAccumulator(
+            "train/episode",
+            targeted_mode=targeted_mode,
+        )
+        # Interval accumulator. Spans every episode since the last reset, so
+        # the trend-line signal survives sparse episode logging.
+        if self.interval_metrics is None:
+            self.interval_metrics = FacilityMetricAccumulator(
+                "train/interval",
+                targeted_mode=targeted_mode,
+            )
 
     def eval_init(self):
         """Initialize metrics at the beginning of each episode."""
@@ -142,6 +166,8 @@ class SustainDCLogger(BaseLogger):
             self.metrics["step_count"] += 1
             if self.rollout_metrics is not None:
                 self.rollout_metrics.add(infos[i][0])
+            if self.interval_metrics is not None:
+                self.interval_metrics.add(infos[i][0])
 
     def eval_per_step(self, eval_data):
         """Capture and update metrics per step during evaluation."""
@@ -170,17 +196,56 @@ class SustainDCLogger(BaseLogger):
                 self.eval_thread_metrics[i].add(eval_infos[i][0])
 
 
+    def episode_metrics_log(self):
+        """Log facility metrics for the episode that just finished.
+
+        Two namespaces are emitted:
+
+        * ``train/episode`` -- this episode's metrics only. Always emitted for
+          every episode, so no episode's facility metrics are lost when
+          episode logging is sparse.
+        * ``train/interval`` -- metrics accumulated across every episode
+          since the last interval reset. This is the smooth trend-line
+          signal; it is reset by :meth:`reset_interval_metrics`.
+
+        The interval accumulator is deliberately NOT reset here, so it keeps
+        accumulating across the logging interval.
+        """
+        if self.rollout_metrics is not None:
+            episode_snapshot = self.rollout_metrics.snapshot()
+            self._log_metrics(episode_snapshot, self.total_num_steps)
+            if self.console_verbosity != "off":
+                print(f"Episode {self.episode} metrics:")
+                summary = format_console_summary(episode_snapshot, "train/episode")
+                if summary:
+                    print(summary)
+
+        if self.interval_metrics is not None:
+            interval_snapshot = self.interval_metrics.snapshot()
+            self._log_metrics(interval_snapshot, self.total_num_steps)
+
+    def reset_interval_metrics(self):
+        """Reset the interval accumulator so the next interval starts fresh."""
+        if self.interval_metrics is not None:
+            self.interval_metrics.reset()
+
+    def _log_metrics(self, metrics, global_step):
+        """Send a metric mapping to the writer, tolerating writers without it."""
+        if hasattr(self.writter, "log_metrics"):
+            self.writter.log_metrics(metrics, global_step)
+        else:
+            for tag, value in metrics.items():
+                self.writter.add_scalar(tag, value, global_step)
+
+    def console_summary_text(self, namespace="train/episode"):
+        """Render the curated console summary for a metric namespace."""
+        if self.rollout_metrics is None:
+            return ""
+        return format_console_summary(self.rollout_metrics.snapshot(), namespace)
+
     def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
         """Calculate and log metrics at the end of the episode."""
         super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
-        if self.rollout_metrics is not None:
-            canonical_metrics = self.rollout_metrics.snapshot()
-            if hasattr(self.writter, "log_metrics"):
-                self.writter.log_metrics(canonical_metrics, self.total_num_steps)
-            else:
-                for tag, value in canonical_metrics.items():
-                    self.writter.add_scalar(tag, value, self.total_num_steps)
-            self.rollout_metrics.reset()
 
         if self.metrics["step_count"] > 0:
             average_net_energy = self.metrics["net_energy_sum"] / self.metrics["step_count"]
@@ -225,8 +290,13 @@ class SustainDCLogger(BaseLogger):
         self.writter.add_scalar("metrics/Total Tasks Dropped", total_tasks_dropped, self.total_num_steps)
 
         # Optionally, log to the console or to a file
-        print(f"Episode {self.episode}: Avg Net Energy={average_net_energy:.3f}, Avg CO2={average_CO2_footprint:.3f}, Water Usage={total_water_usage:.3f}")
-        print(f"Tasks in Queue={total_tasks_in_queue:.3f}, Tasks Dropped={total_tasks_dropped:.3f}")
+        if self.console_verbosity != "off":
+            print(f"Episode {self.episode}: Avg Net Energy={average_net_energy:.3f}, Avg CO2={average_CO2_footprint:.3f}, Water Usage={total_water_usage:.3f}")
+            print(f"Tasks in Queue={total_tasks_in_queue:.3f}, Tasks Dropped={total_tasks_dropped:.3f}")
+            if self.console_verbosity == "full":
+                summary = self.console_summary_text()
+                if summary:
+                    print(summary)
 
         # Reset metrics for the next episode
         self.metrics = {
