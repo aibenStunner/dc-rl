@@ -34,13 +34,20 @@ class Battery2:
         capacity,
         current_load=0,
         round_trip_efficiency=1.0,
-        c_lim=0.1,
-        d_lim=1,
+        c_lim=None,
+        d_lim=None,
         upper_u=-0.04,
         upper_v=1,
         lower_u=0.01,
         lower_v=0,
+        rated_power_mw=None,
     ):
+        if not _is_finite_positive(capacity):
+            raise ValueError("capacity must be finite and positive")
+        if not _is_finite_nonnegative(current_load) or float(current_load) > float(capacity):
+            raise ValueError("current_load must be finite and within capacity")
+        if rated_power_mw is not None and not _is_finite_positive(rated_power_mw):
+            raise ValueError("rated_power_mw must be finite and positive")
         if not _is_finite_positive(round_trip_efficiency) or round_trip_efficiency > 1.0:
             raise ValueError("round_trip_efficiency must be finite in (0, 1]")
         self.capacity = float(capacity)
@@ -48,6 +55,14 @@ class Battery2:
         self.round_trip_efficiency = float(round_trip_efficiency)
         self.eff_c = math.sqrt(self.round_trip_efficiency)
         self.eff_d = math.sqrt(self.round_trip_efficiency)
+        self.rated_power_mw = None if rated_power_mw is None else float(rated_power_mw)
+        # C-rates are cell-side; discharge must replace conversion losses.
+        if c_lim is None:
+            c_lim = 0.1 if self.rated_power_mw is None else self.rated_power_mw * self.eff_c / self.capacity
+        if d_lim is None:
+            d_lim = 1.0 if self.rated_power_mw is None else self.rated_power_mw / (self.eff_d * self.capacity)
+        if not _is_finite_nonnegative(c_lim) or not _is_finite_nonnegative(d_lim):
+            raise ValueError("c_lim and d_lim must be finite and non-negative")
         self.c_lim = float(c_lim)
         self.d_lim = float(d_lim)
         self.upper_lim_u = float(upper_u)
@@ -73,7 +88,8 @@ class Battery2:
             (self.capacity - self.current_load)
             / (self.eff_c * duration_hours)
         )
-        return max(0.0, min(max_cell_rate_power, max_cell_capacity_power))
+        limit = float('inf') if self.rated_power_mw is None else self.rated_power_mw
+        return max(0.0, min(max_cell_rate_power, max_cell_capacity_power, limit))
 
     def calc_max_discharge_bus_power(self, duration_hours, dc_bus_limit_mw):
         """Maximum bus-side discharge power in MW at the current cell SoC."""
@@ -84,8 +100,9 @@ class Battery2:
         max_cell_capacity_power = (
             self.current_load * self.eff_d / duration_hours
         )
+        limit = float('inf') if self.rated_power_mw is None else self.rated_power_mw
         return max(0.0, min(max_cell_rate_power, max_cell_capacity_power,
-                            max(0.0, dc_bus_limit_mw)))
+                            max(0.0, dc_bus_limit_mw), limit))
 
     def charge(self, requested_bus_power_mw, duration_hours):
         """Charge from the bus and return the realized flow."""

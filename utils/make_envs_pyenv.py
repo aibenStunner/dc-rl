@@ -53,7 +53,8 @@ def make_bat_fwd_env(month,
                     n_fwd_steps : int = 4,
                     round_trip_efficiency : float = 0.90,
                     degradation_cost_c_per_kwh : float = 5.78,
-                    initial_soc: float = 0.0
+                    initial_soc: float = 0.0,
+                    rated_power_mw: float = None
                     ):
     """Method to build the Battery environment.
 
@@ -76,9 +77,129 @@ def make_bat_fwd_env(month,
                  'dcload_min':dcload_min,
                  'round_trip_efficiency': round_trip_efficiency,
                  'degradation_cost_c_per_kwh': degradation_cost_c_per_kwh,
-                 'initial_soc': initial_soc}
+                 'initial_soc': initial_soc,
+                 'rated_power_mw': rated_power_mw}
     bat_env = battery_env_fwd(env_config)
     return bat_env
+
+def _size_scaling(config, target_mw, min_temp, max_temp, ambient):
+    """Calibrate a deterministic cyclic layout using the runtime meter boundary."""
+    config.sizing_mode = 'scaling'
+    # Preserve the original template rack density and characteristics.
+    # servers, preserving each source rack's CPU and thermal characteristics.
+    source_supply = config.RACK_SUPPLY_APPROACH_TEMP_LIST[:]
+    source_return = config.RACK_RETURN_APPROACH_TEMP_LIST[:]
+    source_power = config.DEFAULT_SERVER_POWER_CHARACTERISTICS[:]
+    templates = [(source_supply[i], source_return[i], source_power[i], rack)
+                 for i, rack in enumerate(config.RACK_CPU_CONFIG)]
+    template_supply, template_return, template_power, template_cpus = map(list, zip(*templates))
+    template_count = len(templates)
+    # Keep original rack density; prevent the legacy per-rack power budget from
+    # rejecting any template server. It is not a physical rack power limit.
+    config.MAX_W_PER_RACK = max(sum(cpu['full_load_pwr'] for cpu in rack)
+                                for rack in template_cpus) + 1
+    measured = {}
+
+    def evaluate(count, occupancy=None):
+        """Evaluate one candidate layout: `count` racks at `occupancy` servers.
+
+        `occupancy` of None means every rack carries the full template density.
+        A lower occupancy models a partially populated rack, which gives the
+        calibration finer granularity than whole 200-server racks.
+        """
+        key = (count, occupancy)
+        if key in measured:
+            return measured[key]
+        config.NUM_RACKS = count
+        config.NUM_ROWS = 1
+        config.NUM_RACKS_PER_ROW = count
+        config.RACK_SUPPLY_APPROACH_TEMP_LIST = [template_supply[i % template_count] for i in range(count)]
+        config.RACK_RETURN_APPROACH_TEMP_LIST = [template_return[i % template_count] for i in range(count)]
+        if occupancy is None:
+            config.RACK_CPU_CONFIG = [template_cpus[i % template_count] for i in range(count)]
+        else:
+            config.RACK_CPU_CONFIG = [
+                list(template_cpus[i % template_count][:occupancy])
+                for i in range(count)
+            ]
+        config.DEFAULT_SERVER_POWER_CHARACTERISTICS = [
+            template_power[i % template_count]
+            for i in range(count)]
+        flow, rated = DataCenter.chiller_sizing(config, min_CRAC_setpoint=min_temp,
+                                                max_CRAC_setpoint=max_temp, max_ambient_temp=ambient)
+        config.CT_REFRENCE_AIR_FLOW_RATE, config.CT_FAN_REF_P = flow, rated
+        dc = DataCenter.DataCenter_ITModel(count, config.RACK_SUPPLY_APPROACH_TEMP_LIST,
+                                           config.RACK_CPU_CONFIG, config.MAX_W_PER_RACK, config)
+        cpu, fan, outlet = dc.compute_datacenter_IT_load_outlet_temp([100.0] * count, max_temp)
+        it = sum(cpu) + sum(fan)
+        return_temp = DataCenter.calculate_avg_CRAC_return_temp(config.RACK_RETURN_APPROACH_TEMP_LIST, outlet)
+        crac, tower, _, compressor, cw, ct = DataCenter.calculate_HVAC_power(
+            max_temp, return_temp, ambient, it, config)
+        result = (it + tower + compressor, it, tower, compressor, crac, cw, ct)
+        if not all(np.isfinite(result)) or result[0] <= 0:
+            raise ValueError('Facility sizing produced nonfinite or nonpositive power')
+        measured[key] = result
+        return result
+
+    target = target_mw * 1e6
+    low, high = 1, 1
+    # Bounded exponential search; a non-monotone sampled model is rejected,
+    # rather than relying on a binary search with an invalid assumption.
+    while evaluate(high)[0] < target and high < 4096:
+        high = min(high * 2, 4096)
+    while low < high:
+        mid = (low + high) // 2
+        if evaluate(mid)[0] < target:
+            low = mid + 1
+        else:
+            high = mid
+    for count in range(max(1, low - 2), min(4096, low + 2) + 1):
+        evaluate(count)
+    ordered = sorted(k for k in measured if k[1] is None)
+    if any(measured[a][0] >= measured[b][0] for a, b in zip(ordered, ordered[1:])):
+        raise ValueError('Facility design power is not monotone over sampled layouts')
+    best = min(ordered, key=lambda n: (abs(measured[n][0] - target), n[0]))
+
+    # Refine with a partially populated final rack. The template density is
+    # quantized to whole racks, which can leave a small target outside
+    # tolerance; a partial rack gives finer control of the achieved rating.
+    # A rack must stay above the model's minimum viable occupancy, which the
+    # thermal model rejects below with an outlet-rise error.
+    full_density = len(template_cpus[0])
+    minimum_occupancy = 45
+    if abs((measured[best][0] - target) / target) > 0.02:
+        for count in (best[0], best[0] + 1):
+            for occupancy in range(minimum_occupancy, full_density):
+                try:
+                    evaluate(count, occupancy)
+                except ValueError:
+                    continue
+    refined = [k for k in measured if k[1] is not None]
+    if refined:
+        candidate = min(refined, key=lambda n: (abs(measured[n][0] - target), n[0], -n[1]))
+        if abs((measured[candidate][0] - target) / target) < abs((measured[best][0] - target) / target):
+            best = candidate
+
+    total, it, tower, compressor, crac, cw, ct = measured[best]
+    error = (total - target) / target
+    if abs(error) > 0.02:
+        raise ValueError(f'Facility target {target_mw:g} MW cannot be achieved within 2%; '
+                         f'nearest sampled design {total / 1e6:.6g} MW with {best[0]} racks')
+    # Restore the winning layout even when its cached evaluation was not last.
+    del measured[best]
+    evaluate(*best)
+    return {'mode': 'scaling', 'target_mw': target_mw, 'achieved_mw': total / 1e6,
+            'relative_error': error, 'rack_count': best[0],
+            'servers_per_rack': best[1] if best[1] is not None else full_density,
+            'server_count': sum(map(len, config.RACK_CPU_CONFIG)),
+            'utilization': 1.0, 'crac_setpoint_c': max_temp,
+            'min_crac_setpoint_c': min_temp, 'ambient_temperature_c': ambient,
+            'it_mw': it / 1e6, 'tower_fan_mw': tower / 1e6,
+            'compressor_mw': compressor / 1e6, 'hvac_mw': (tower + compressor) / 1e6,
+            'excluded_crac_fan_mw': crac / 1e6, 'excluded_cw_pump_mw': cw / 1e6,
+            'excluded_ct_pump_mw': ct / 1e6,
+            'caveat': 'Modeled design rating, not a cap or independently validated site demand; CRAC fan and pumps excluded from meter.'}
+
 
 def make_dc_pyeplus_env(month : int = 1,
                         location : str = 'NYIS',
@@ -90,6 +211,7 @@ def make_dc_pyeplus_env(month : int = 1,
                         episode_length_in_time : pd.Timedelta = None,
                         use_ls_cpu_load : bool = False,
                         num_sin_cos_vars : int = 4,
+                        facility_sizing_mode: str = 'legacy',
                         ):
     """Method that creates the data center environment with the timeline, location, proper data files, gym specifications and auxiliary methods
 
@@ -104,9 +226,16 @@ def make_dc_pyeplus_env(month : int = 1,
         episode_length_in_time (pd.Timedelta, optional): Length of an episode in terms of pandas time-delta object. Defaults to None.
         use_ls_cpu_load (bool, optional): Use the cpu workload value from a separate Load Shifting agent. This turns of reading default cpu data. Defaults to False.
         num_sin_cos_vars (int, optional): Number of sin and cosine variable that will be added externally from the centralized data source
+        facility_sizing_mode: 'legacy' retains historical sizing; 'scaling'
+            sizes whole racks to total IT plus tower fan and compressor at full
+            utilization, maximum setpoint, and location design ambient. This is
+            a modeled design rating, not a power cap. CRAC fan and pumps are
+            calculated by the model but excluded from the runtime meter.
     Returns:
         envs.dc_gym.dc_gymenv: The environment instantiated with the particular month.
     """
+    if facility_sizing_mode not in ('legacy', 'scaling'):
+        raise ValueError(f'Unknown facility_sizing_mode: {facility_sizing_mode!r}')
     observation_variables = []
     ############################################################################
     ######################### Standard Variables included as default ###########
@@ -155,8 +284,16 @@ def make_dc_pyeplus_env(month : int = 1,
     # setting a lower value of min_CRAC_setpoint will cause the CT to consume more power for higher crac setpoints during normal use. Lower min_CRAC_set -> higher HVAC power
     
     # dictionary with locations and min_CRAC_setpoint/max_amb_temp
+    #
+    # The design ambient is the temperature the cooling plant is sized for.
+    # It must match the scenario's weather file: an oversized design ambient
+    # under-sizes the chiller and cooling tower, so the modeled facility can
+    # no longer meet its electrical rating at hot weather.
 
-    if 'NY'.lower() in location.lower():
+    if 'QC'.lower() in location.lower() or 'MONTREAL'.lower() in location.lower():
+        # Montreal-Trudeau TMYx: maximum dry-bulb 33.0 C, 99th percentile 29.0 C.
+        max_amb_temperature = 33.0
+    elif 'NY'.lower() in location.lower():
         max_amb_temperature = 30.0
     elif 'AZ'.lower() in location.lower():
         max_amb_temperature = 50.0
@@ -165,7 +302,13 @@ def make_dc_pyeplus_env(month : int = 1,
     else:
         print('WARNING, using default values for chiller sizing...')
         max_amb_temperature = 50.0
-        
+
+    if facility_sizing_mode == 'scaling':
+        sizing_metadata = _size_scaling(dc_config, datacenter_capacity_mw, min_temp,
+                                           max_temp, max_amb_temperature)
+    else:
+        sizing_metadata = {'mode': 'legacy'}
+    dc_config.sizing_metadata = sizing_metadata
     ctafr, ct_rated_load = DataCenter.chiller_sizing(dc_config, min_CRAC_setpoint=min_temp, max_CRAC_setpoint=max_temp, max_ambient_temp=max_amb_temperature)
     dc_config.CT_REFRENCE_AIR_FLOW_RATE = ctafr
     dc_config.CT_FAN_REF_P = ct_rated_load
@@ -245,6 +388,7 @@ def make_dc_pyeplus_env(month : int = 1,
                     episode_length_in_time=episode_length_in_time
                     )
     
+    dc_env.sizing_metadata = sizing_metadata
     dc_env.NormalizeObservation()
     max_dc_pw = ranges['Facility Total HVAC Electricity Demand Rate(Whole Building)'][1]+\
         ranges['Facility Total Building Electricity Demand Rate(Whole Building)'][1]

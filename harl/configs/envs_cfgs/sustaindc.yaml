@@ -25,9 +25,19 @@ pv:
   temperature_model: close_mount_glass_glass
   export_policy: curtail
 workload_file: "Alibaba_CPU_Data_Hourly_1.csv"
+# scaling sizes the modelled hardware so that full-utilization facility
+# demand matches datacenter_capacity_mw at the design conditions recorded in
+# dc_env.sizing_metadata. It is a design rating, not a cap on every episode.
+# legacy reproduces the earlier fixed 20-rack sizing exactly.
+facility_sizing:
+  mode: scaling
+# Legacy observation range only; not the scaling BESS power rating.
 max_bat_cap_Mw: 1.0
-# Reduced-form BESS physics. Degradation is report-only in this phase.
+# Dispatchable BESS, not UPS backup: bus-side rated power is a fraction of
+# the facility rating and nominal cell energy is rated MW * duration hours.
 battery:
+  power_fraction: 1.0
+  duration_hours: 2.0
   round_trip_efficiency: 0.90
   degradation_cost_c_per_kwh: 5.78
   initial_soc: 0.5

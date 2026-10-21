@@ -32,6 +32,9 @@ class BatteryEnvFwd(gym.Env):
             capacity=max_bat_cap,
             current_load=0.0,
             round_trip_efficiency=self.round_trip_efficiency,
+            rated_power_mw=env_config.get('rated_power_mw'),
+            c_lim=env_config.get('c_lim'),
+            d_lim=env_config.get('d_lim'),
         )
         self.n_fwd_steps = n_fwd_steps
         self.charging_rate = env_config['charging_rate']
@@ -103,6 +106,8 @@ class BatteryEnvFwd(gym.Env):
             'bat_charge_efficiency': self.battery.eff_c,
             'bat_discharge_efficiency': self.battery.eff_d,
             'bat_max_bat_cap': self.max_bat_cap,
+            'bat_capacity_mwh': self.max_bat_cap,
+            'bat_rated_power_mw': self.battery.rated_power_mw,
             'bat_a_t': action_name,
             'bat_dcload_min': self.dcload_min,
             'bat_dcload_max': self.dcload_max,
@@ -169,10 +174,14 @@ class BatteryEnvFwd(gym.Env):
 
     def charging_rate_modifier(self, battery):
         scaled_soc = battery.current_load / battery.capacity
+        if battery.rated_power_mw is not None:
+            return battery.rated_power_mw * 2 * (1 - self.sigmoid(10 * (scaled_soc - 0.5)))
         return np.round(0.5 * (1 - self.sigmoid(10 * (scaled_soc - 0.5))), 4)
 
     def discharging_rate_modifier(self, battery):
         scaled_soc = battery.current_load / battery.capacity
+        if battery.rated_power_mw is not None:
+            return battery.rated_power_mw * max(0.125, 2 * self.sigmoid(10 * (scaled_soc - 0.25)))
         return max(0.5, 4 * self.sigmoid(10 * (scaled_soc - 0.25)))
 
 

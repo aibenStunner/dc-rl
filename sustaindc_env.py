@@ -55,6 +55,7 @@ class EnvConfig(dict):
         
         # Capacity (MW) of the datacenter
         'datacenter_capacity_mw': 1,
+        'facility_sizing': {'mode': 'legacy'},
 
         # Sample each episode's start day from the whole year instead of a
         # +/-7 day window around `month`. Required for HQ's winter period
@@ -105,6 +106,10 @@ class EnvConfig(dict):
             'round_trip_efficiency': 0.90,
             'degradation_cost_c_per_kwh': 5.78,
             'initial_soc': 0.0,
+            'power_fraction': None,
+            'duration_hours': None,
+            'rated_power_mw': None,
+            'capacity_mwh': None,
         },
         
         # Data center configuration file
@@ -153,7 +158,7 @@ class EnvConfig(dict):
         # merge onto their defaults so callers may override one parameter
         # without accidentally dropping the other physical assumption.
         for key, val in raw_config.items():
-            if key in {"battery", "weather", "pv", "reward"}:
+            if key in {"battery", "weather", "pv", "reward", "facility_sizing"}:
                 if not isinstance(val, dict):
                     raise ValueError(f"{key} must be a mapping")
                 if key == "reward" and val.get("mode") == "team_tariff_targeted_safeguards":
@@ -180,7 +185,43 @@ def _targeted_reward_defaults():
     }
 
 
+def resolve_battery_sizing(config):
+    """Resolve bus-side MW and cell-side MWh for the scaled BESS."""
+    if config['facility_sizing']['mode'] == 'legacy':
+        return None
+    battery = config['battery']
+    power = battery['rated_power_mw']
+    if power is None:
+        fraction = battery['power_fraction']
+        power = config['datacenter_capacity_mw'] * (1.0 if fraction is None else fraction)
+    energy = battery['capacity_mwh']
+    if energy is None:
+        duration = battery['duration_hours']
+        energy = power * (2.0 if duration is None else duration)
+    return float(power), float(energy)
+
+
 def _validate_env_config(config):
+    sizing_mode = config['facility_sizing']['mode']
+    if sizing_mode not in {'legacy', 'scaling'}:
+        raise ValueError('facility_sizing.mode must be legacy or scaling')
+    battery = config['battery']
+    for key in ('power_fraction', 'duration_hours', 'rated_power_mw', 'capacity_mwh'):
+        value = battery[key]
+        if value is not None:
+            if isinstance(value, bool) or not np.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f'battery.{key} must be finite and positive')
+    if battery['rated_power_mw'] is not None and battery['power_fraction'] is not None:
+        raise ValueError('battery.rated_power_mw conflicts with power_fraction')
+    if battery['capacity_mwh'] is not None and battery['duration_hours'] is not None:
+        raise ValueError('battery.capacity_mwh conflicts with duration_hours')
+    if sizing_mode == 'legacy' and any(battery[k] is not None for k in
+            ('power_fraction', 'duration_hours', 'rated_power_mw', 'capacity_mwh')):
+        raise ValueError('explicit battery sizing requires facility_sizing.mode scaling')
+    if sizing_mode == 'scaling':
+        value = config['datacenter_capacity_mw']
+        if isinstance(value, bool) or not np.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError('datacenter_capacity_mw must be finite and positive')
     mode = config["reward"]["mode"]
     if mode not in {"legacy", "team_tariff_targeted_safeguards"}:
         raise ValueError(f"reward.mode {mode!r} is unsupported")
@@ -240,6 +281,8 @@ class SustainDC(gym.Env):
         
         self.max_bat_cap_Mw = env_config['max_bat_cap_Mw']
         self.battery_config = env_config['battery']
+        self.facility_sizing = env_config['facility_sizing']
+        self.battery_sizing = resolve_battery_sizing(env_config)
         self.reward_config = env_config['reward']
         self.episode_start_policy = env_config['episode_start_policy']
         self.indv_reward = env_config['individual_reward_weight']
@@ -266,8 +309,11 @@ class SustainDC(gym.Env):
 
         ci_loc, wea_loc = obtain_paths(self.location)
         # An explicit carbon-intensity file selects a custom profile while
-        # preserving the location-derived weather file. 
+        # preserving the location-derived weather file.
         # CI_Manager uses its filename only when location is empty.
+        # The data-centre factory still needs the scenario location, because
+        # it selects the cooling-plant design ambient from it.
+        dc_loc = ci_loc
         if self.ci_file:
             ci_loc = ""
         
@@ -287,10 +333,13 @@ class SustainDC(gym.Env):
                                   n_vars_energy=n_vars_energy, n_vars_battery=n_vars_battery,
                                   queue_max_len=1000,
                                   flexible_workload_ratio=self.flexible_load)
-        self.dc_env, _ = make_dc_pyeplus_env(month=self.month + 1, location=ci_loc, max_bat_cap_Mw=self.max_bat_cap_Mw, use_ls_cpu_load=True, 
-                                             datacenter_capacity_mw=self.datacenter_capacity_mw, dc_config_file=self.dc_config_file, add_cpu_usage=False)
-        self.bat_env = make_bat_fwd_env(month=self.month, max_bat_cap_Mwh=self.dc_env.ranges['max_battery_energy_Mwh'], 
-                                        max_dc_pw_MW=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][1] / 1e6, 
+        self.dc_env, _ = make_dc_pyeplus_env(month=self.month + 1, location=dc_loc, max_bat_cap_Mw=self.max_bat_cap_Mw, use_ls_cpu_load=True,
+                                             datacenter_capacity_mw=self.datacenter_capacity_mw, dc_config_file=self.dc_config_file, add_cpu_usage=False,
+                                             facility_sizing_mode=self.facility_sizing['mode'])
+        battery_power, battery_energy = self.battery_sizing or (None, self.dc_env.ranges['max_battery_energy_Mwh'])
+        self.bat_env = make_bat_fwd_env(month=self.month, max_bat_cap_Mwh=battery_energy,
+                                        rated_power_mw=battery_power,
+                                        max_dc_pw_MW=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][1] / 1e6,
                                         dcload_max=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][1],
                                         dcload_min=self.dc_env.ranges['Facility Total Electricity Demand Rate(Whole Building)'][0],
                                         n_fwd_steps=n_vars_ci,

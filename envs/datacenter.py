@@ -68,7 +68,9 @@ class Rack():
             self.CPU_list.append(CPU(full_load_pwr = CPU_config['full_load_pwr'], idle_pwr = CPU_config['idle_pwr'], cpu_config = self.rack_config))
             self.current_rack_load += self.CPU_list[-1].full_load_pwr
             if self.current_rack_load>= max_W_per_rack:
-                self.CPU_list.pop()
+                rejected = self.CPU_list.pop()
+                if getattr(self.rack_config, 'sizing_mode', 'legacy') == 'scaling':
+                    self.current_rack_load -= rejected.full_load_pwr
                 break
             
         self.num_CPUs = len(self.CPU_list)
@@ -227,6 +229,8 @@ class DataCenter_ITModel():
             chiller_sizing (bool): Whether to perform Chiller Power Sizing
         """
         self.DC_ITModel_config = DC_ITModel_config
+        if len(rack_CPU_config) != num_racks or len(rack_supply_approach_temp_list) != num_racks:
+            raise ValueError('Rack configurations and supply temperatures must match num_racks')
         self.racks_list = []
         self.rack_supply_approach_temp_list = rack_supply_approach_temp_list
         self.rack_CPU_config = rack_CPU_config

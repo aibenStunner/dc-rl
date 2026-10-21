@@ -1,4 +1,5 @@
 """Tests for optional local TensorBoard and W&B tracking."""
+import importlib
 import json
 import math
 
@@ -261,8 +262,19 @@ def test_run_and_close_reraises_and_closes_once():
 
 
 def test_local_only_initialization_failure_keeps_tensorboard_writer():
+    # The tracker imports W&B lazily with importlib, so removing it from
+    # sys.modules is not enough: the import would simply succeed again.
+    # Block the import itself to exercise the local_only fallback.
+    original_import_module = importlib.import_module
+
+    def failing_import(name, *args, **kwargs):
+        if name == "wandb":
+            raise ImportError("wandb is unavailable for this test")
+        return original_import_module(name, *args, **kwargs)
+
     old_wandb = sys.modules.get("wandb")
     sys.modules.pop("wandb", None)
+    importlib.import_module = failing_import
     try:
         with tempfile.TemporaryDirectory() as directory:
             args = _args({
@@ -285,6 +297,7 @@ def test_local_only_initialization_failure_keeps_tensorboard_writer():
             assert status["status"] == "local_only"
             assert "import" in status["warning"].lower()
     finally:
+        importlib.import_module = original_import_module
         if old_wandb is not None:
             sys.modules["wandb"] = old_wandb
 

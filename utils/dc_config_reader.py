@@ -3,7 +3,7 @@ This file is used to read the data center configuration from  user inputs provid
 """
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 
 class DC_Config:
     def __init__(self, dc_config_file='dc_config.json', datacenter_capacity_mw=1):
@@ -18,6 +18,8 @@ class DC_Config:
         self.config_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), dc_config_file)
         
         # Define the maximum compute power capacity of the datacenter on MW
+        if not isinstance(datacenter_capacity_mw, (int, float)) or isinstance(datacenter_capacity_mw, bool) or not math.isfinite(datacenter_capacity_mw) or datacenter_capacity_mw <= 0:
+            raise ValueError('datacenter_capacity_mw must be finite and positive')
         self.datacenter_capacity_mw = datacenter_capacity_mw
         
         # Load the JSON data from the configuration file
@@ -47,6 +49,9 @@ class DC_Config:
         # Data Center Geometric configuration
         self.NUM_ROWS = json_obj['data_center_configuration']['NUM_ROWS']  # number of rows in which data centers are arranged
         self.NUM_RACKS_PER_ROW = json_obj['data_center_configuration']['NUM_RACKS_PER_ROW']  # number of racks/ITcabinets in each row
+        if any(not isinstance(v, int) or isinstance(v, bool) or v <= 0
+               for v in (self.NUM_ROWS, self.NUM_RACKS_PER_ROW)):
+            raise ValueError('Rack geometry must contain positive integer dimensions')
         self.NUM_RACKS = self.NUM_ROWS * self.NUM_RACKS_PER_ROW  # calculate total number of racks/ITcabinets in the data center model
 
         self.TOTAM_MAX_PWR = self.datacenter_capacity_mw * 1e6  # specify maximum allowed power consumption (W) for the entire data center
@@ -87,22 +92,26 @@ class DC_Config:
         self.DEFAULT_SERVER_POWER_CHARACTERISTICS = json_obj['server_characteristics']['DEFAULT_SERVER_POWER_CHARACTERISTICS']
 
         # This list should be of length NUM_RACKS; Here DEFAULT_SERVER_POWER_CHARACTERISTICS is of same length as NUM_RACKS
-        assert len(self.DEFAULT_SERVER_POWER_CHARACTERISTICS) == self.NUM_RACKS, "DEFAULT_SERVER_POWER_CHARACTERISTICS should be of length as NUM_RACKS"
+        if (not isinstance(self.CPUS_PER_RACK, int) or isinstance(self.CPUS_PER_RACK, bool)
+                or self.CPUS_PER_RACK <= 0):
+            raise ValueError('CPUS_PER_RACK must be a positive integer')
+        arrays = (self.RACK_SUPPLY_APPROACH_TEMP_LIST, self.RACK_RETURN_APPROACH_TEMP_LIST,
+                  self.DEFAULT_SERVER_POWER_CHARACTERISTICS)
+        if any(len(values) != self.NUM_RACKS for values in arrays):
+            raise ValueError('Rack characteristic arrays must match geometry')
+        if any(not math.isfinite(v) for values in arrays[:2] for v in values):
+            raise ValueError('Rack temperatures must be finite')
+        if any(len(v) < 2 or any(not math.isfinite(p) or p < 0 for p in v)
+               or v[0] <= 0 or v[-1] > v[0] for v in arrays[2]):
+            raise ValueError('Invalid server power characteristics')
         # self.RACK_CPU_CONFIG = [[{'full_load_pwr' : j[0],
                             # 'idle_pwr': j[-1]} for _ in range(int(self.CPUS_PER_RACK))] for j in self.DEFAULT_SERVER_POWER_CHARACTERISTICS]
 
-        # Parallelize the construction of RACK_CPU_CONFIG
-        def construct_cpu_config(server_power_characteristics):
-            """Function to construct CPU configuration for a single server."""
-            return [{'full_load_pwr': j[0], 'idle_pwr': j[-1]} for _ in range(int(self.CPUS_PER_RACK)) for j in server_power_characteristics]
-        
-        # Use ThreadPoolExecutor to parallelize the operation
-        with ThreadPoolExecutor() as executor:
-            # Submit tasks to the executor
-            futures = [executor.submit(construct_cpu_config, [j]) for j in self.DEFAULT_SERVER_POWER_CHARACTERISTICS]
-            
-            # Wait for the futures to complete and collect the results
-            self.RACK_CPU_CONFIG = [future.result() for future in as_completed(futures)]
+        self.RACK_CPU_CONFIG = [
+            [{'full_load_pwr': j[0], 'idle_pwr': j[-1]}
+             for _ in range(int(self.CPUS_PER_RACK))]
+            for j in self.DEFAULT_SERVER_POWER_CHARACTERISTICS
+        ]
 
         # A default value of HP_PROLIANT server for standalone testing
         self.HP_PROLIANT = json_obj["server_characteristics"]['HP_PROLIANT']
