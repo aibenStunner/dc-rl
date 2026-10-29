@@ -20,8 +20,10 @@ class BatteryEnvFwd(gym.Env):
             env_config['degradation_cost_c_per_kwh']
         )
         self.initial_soc = _validate_initial_soc(env_config.get('initial_soc', 0.0))
-        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(27)),
-                                            high=np.float32(1.0 * np.ones(27)))
+        observation_high = np.ones(29, dtype=np.float32)
+        observation_high[15:17] = 10.0
+        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(29)),
+                                            high=observation_high)
         self.max_dc_pw_MW = env_config['max_dc_pw_MW']
         self.action_space = spaces.Discrete(3)
         self._action_to_direction = {0: 'charge', 1: 'discharge', 2: 'idle'}

@@ -1,8 +1,11 @@
 """Reward routing checks for SustainDC's HARL integration."""
+import inspect
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
+import torch
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -10,8 +13,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tests._harness import run_module_tests
 from harl.common.buffers.on_policy_critic_buffer_fp import OnPolicyCriticBufferFP
+from harl.common.valuenorm import ValueNorm
 from harl.envs.sustaindc.harlsustaindc_env import fp_critic_observations
-from harl.runners.on_policy_base_runner import select_ep_team_rewards
+from harl.runners.on_policy_base_runner import OnPolicyBaseRunner, select_ep_team_rewards
 from harl.common.base_logger import BaseLogger
 
 
@@ -115,6 +119,45 @@ def test_fp_buffer_preserves_distinct_agent_reward_columns():
     np.testing.assert_array_equal(buffer.rewards[0], rewards)
     buffer.compute_returns(np.zeros((1, 3, 1), dtype=np.float32))
     np.testing.assert_array_equal(buffer.returns[0], rewards)
+
+
+def test_value_normalizer_registers_statistics_on_non_cpu_device():
+    normalizer = ValueNorm(1, device=torch.device("meta"))
+    assert set(normalizer.state_dict()) == {
+        "running_mean", "running_mean_sq", "debiasing_term"
+    }
+
+
+def test_runner_does_not_use_removed_numpy_inf():
+    assert "np.Inf" not in inspect.getsource(OnPolicyBaseRunner.__init__)
+
+
+def test_cpu_checkpoint_loader_uses_cpu_map_location():
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "value_normalizer.pt"
+        torch.save(ValueNorm(1).state_dict(), checkpoint)
+        runner = object.__new__(OnPolicyBaseRunner)
+        runner.device = torch.device("cpu")
+        runner.algo_args = {"train": {"model_dir": directory}}
+        state = runner._load_checkpoint("value_normalizer.pt")
+        assert set(state) == set(ValueNorm(1).state_dict())
+        assert all(value.device.type == "cpu" for value in state.values())
+
+
+def test_empty_value_normalizer_checkpoint_is_rejected():
+    with tempfile.TemporaryDirectory() as directory:
+        torch.save({}, Path(directory) / "value_normalizer.pt")
+        runner = object.__new__(OnPolicyBaseRunner)
+        runner.device = torch.device("cpu")
+        runner.algo_args = {"train": {"model_dir": directory}}
+        runner.value_normalizer = ValueNorm(1)
+        try:
+            runner._restore_value_normalizer()
+        except ValueError as exc:
+            assert "incomplete" in str(exc)
+            assert "running_mean" in str(exc)
+        else:
+            raise AssertionError("empty normalizer checkpoint must not be silently reinitialized")
 
 
 if __name__ == "__main__":

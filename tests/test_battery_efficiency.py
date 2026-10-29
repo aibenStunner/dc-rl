@@ -38,7 +38,7 @@ def test_env_config_deep_merges_partial_battery_options():
     assert config["battery"]["degradation_cost_c_per_kwh"] == 5.78
 
 
-def test_real_sustaindc_exposes_battery_fidelity_metrics_without_changing_observation_width():
+def test_real_sustaindc_exposes_battery_fidelity_metrics_with_peak_context():
     env = SustainDC({
         "agents": ["agent_ls", "agent_dc", "agent_bat"],
         "location": "montreal",
@@ -73,7 +73,7 @@ def test_real_sustaindc_exposes_battery_fidelity_metrics_without_changing_observ
     }
     assert required <= set(battery_info)
     assert all(np.isfinite(battery_info[key]) for key in required)
-    assert [observations[agent].shape[0] for agent in env.agents] == [40, 28, 27]
+    assert [observations[agent].shape[0] for agent in env.agents] == [40, 28, 29]
 
 
 def test_rte_derives_symmetric_one_way_efficiency():

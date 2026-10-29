@@ -90,14 +90,13 @@ class HARLSustainDCEnv:
             # The whole information available without repeating the same information
             concat_states.extend(states[0]) # ls_state
             # dc_state (next_workload and next_exterior_temp) and bat_state
-            # (SOC), picked by POSITION. The positions are imported from
-            # SustainDC rather than hardcoded here: these indices shift
-            # whenever the shared observation prefix changes, and a stale
-            # literal fails SILENTLY (the critic trains on the wrong feature)
-            # rather than raising. See SustainDC.DC_IDX / BAT_IDX.
+            # (SOC, previous load, uncapped billing peak), picked by POSITION.
+            # Keep these indices tied to the state builder in SustainDC.
             concat_states.extend([states[1][SustainDC.DC_IDX["next_workload"]],
                                   states[1][SustainDC.DC_IDX["next_out_temp"]]])
-            concat_states.extend([states[2][SustainDC.BAT_IDX["battery_soc"]]])
+            concat_states.extend([states[2][SustainDC.BAT_IDX[key]] for key in (
+                "battery_soc", "previous_facility_load_ratio", "billing_peak_ratio"
+            )])
             
 
             states = np.array(concat_states, dtype=np.float32)
@@ -108,7 +107,7 @@ class HARLSustainDCEnv:
             return fp_critic_observations(states, self.n_agents)
         return self.repeat(states)
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """
         Reset the environment.
 
@@ -116,9 +115,13 @@ class HARLSustainDCEnv:
             tuple: Observation, shared observation, and available actions.
         """
         self.render_episode += 1
-        self._seed += 1
+        if seed is None:
+            self._seed += 1
+            seed = self._seed
+        else:
+            self._seed = seed
         self.cur_step = 0
-        obs = self.env.reset(seed=self._seed)
+        obs = self.env.reset(seed=seed, options=options)
         obs = self.unwrap(obs)
         
         s_obs = self._create_shared_observation(obs)

@@ -56,8 +56,7 @@ def run(capacity_mw, dispatch=False):
     for index, day in enumerate(START_DAYS):
         random.seed(2026 + index)
         np.random.seed(2026 + index)
-        env.reset()
-        env.t_m.reset(init_day=day, init_hour=0)
+        env.reset(seed=2026 + index, options={'init_day': day, 'init_hour': 0})
         totals = {"facility_kwh": 0.0, "it_kwh": 0.0, "hvac_kwh": 0.0,
                   "grid_kwh": 0.0, "peak_kw": 0.0, "cost_c": 0.0,
                   "charge_kwh": 0.0, "discharge_kwh": 0.0, "pv_kwh": 0.0,

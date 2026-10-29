@@ -62,7 +62,7 @@ class OnPolicyBaseRunner:
         self.share_param = algo_args["algo"]["share_param"]
         self.fixed_order = algo_args["algo"]["fixed_order"]
         
-        self.current_best_avg_eval_episode_reward = -np.Inf
+        self.current_best_avg_eval_episode_reward = -np.inf
         self.update_chkpoints = False
         
         self.dump_info = algo_args["eval"].get('dump_eval_metrcs', False)
@@ -314,6 +314,8 @@ class OnPolicyBaseRunner:
 
             # log information
             if episode % self.algo_args["train"]["log_interval"] == 0:
+                if hasattr(self.logger, "flush_interval_metrics"):
+                    self.logger.flush_interval_metrics()
                 self.logger.episode_log(
                     actor_train_infos,
                     critic_train_info,
@@ -1029,28 +1031,34 @@ class OnPolicyBaseRunner:
             aliases=aliases,
         )
 
+    def _load_checkpoint(self, filename):
+        """Load a local checkpoint onto the runner's selected device."""
+        path = os.path.join(self.algo_args["train"]["model_dir"], filename)
+        return torch.load(path, map_location=self.device, weights_only=True)
+
+    def _restore_value_normalizer(self):
+        state = self._load_checkpoint("value_normalizer.pt")
+        expected = set(self.value_normalizer.state_dict())
+        if set(state) != expected:
+            missing = sorted(expected - set(state))
+            extra = sorted(set(state) - expected)
+            raise ValueError(
+                f"ValueNorm checkpoint is incomplete or incompatible: "
+                f"missing={missing}, unexpected={extra}. "
+                "A fresh normalizer is not a faithful checkpoint resume."
+            )
+        self.value_normalizer.load_state_dict(state)
+
     def restore(self):
         """Restore model parameters."""
         for agent_id in range(self.num_agents):
-            policy_actor_state_dict = torch.load(
-                str(self.algo_args["train"]["model_dir"])
-                + "/actor_agent"
-                + str(agent_id)
-                + ".pt"
-            )
-            self.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
+            state = self._load_checkpoint(f"actor_agent{agent_id}.pt")
+            self.actor[agent_id].actor.load_state_dict(state)
         if not self.algo_args["render"]["use_render"]:
-            policy_critic_state_dict = torch.load(
-                str(self.algo_args["train"]["model_dir"]) + "/critic_agent" + ".pt"
-            )
-            self.critic.critic.load_state_dict(policy_critic_state_dict)
+            state = self._load_checkpoint("critic_agent.pt")
+            self.critic.critic.load_state_dict(state)
             if self.value_normalizer is not None:
-                value_normalizer_state_dict = torch.load(
-                    str(self.algo_args["train"]["model_dir"])
-                    + "/value_normalizer"
-                    + ".pt"
-                )
-                self.value_normalizer.load_state_dict(value_normalizer_state_dict)
+                self._restore_value_normalizer()
 
     def close(self):
         """Close environment, writter, and logger exactly once."""
@@ -1063,6 +1071,8 @@ class OnPolicyBaseRunner:
             self.envs.close()
             if self.algo_args["eval"]["use_eval"] and self.eval_envs is not self.envs:
                 self.eval_envs.close()
+            if hasattr(self.logger, "flush_interval_metrics"):
+                self.logger.flush_interval_metrics()
             self.writter.export_scalars_to_json(str(self.log_dir + "/summary.json"))
             self.writter.close()
             self.logger.close()

@@ -52,20 +52,20 @@ _SUM_SPECS = (
     MetricSpec("bat_cell_throughput_KWh", "battery/cell_throughput_kwh", "sum"),
     MetricSpec("bat_degradation_cost_c", "battery/degradation_cost_c", "sum"),
     MetricSpec("bat_terminal_soc_restore_grid_kwh", "battery/terminal_soc_restore_grid_kwh", "sum"),
-    MetricSpec("bat_CO2_footprint", "carbon/emissions", "sum"),
+    MetricSpec("bat_CO2_footprint", "carbon/emissions_g", "sum"),
     MetricSpec("ls_original_workload", "workload/original_fraction/sum", "sum"),
     MetricSpec("ls_shifted_workload", "workload/shifted_fraction/sum", "sum"),
     MetricSpec("ls_computed_tasks", "workload/tasks/computed", "sum"),
     MetricSpec("ls_tasks_processed", "workload/tasks/processed", "sum"),
-    MetricSpec("ls_tasks_dropped", "sla/dropped_tasks", "sum"),
-    MetricSpec("ls_overdue_penalty", "sla/overdue_tasks/sum", "sum"),
+    MetricSpec("ls_tasks_dropped", "workload/queue_overflow_forced_tasks", "sum"),
+    MetricSpec("ls_overdue_penalty", "sla/overdue_task_steps", "sum"),
     MetricSpec("ls_enforced", "sla/enforced_steps", "sum"),
     MetricSpec("dc_water_usage", "water/liters", "sum"),
-    MetricSpec("dc_constraint_violation", "thermal/constraint", "sum"),
+    MetricSpec("dc_constraint_violation", "thermal/crac_clamp_steps", "sum"),
 )
 _MEAN_SPECS = (
     MetricSpec("price_denorm_c_per_kwh", "tariff/price_c_per_kwh", "mean"),
-    MetricSpec("bat_avg_CI", "carbon/grid_intensity", "mean"),
+    MetricSpec("bat_avg_CI", "carbon/grid_intensity_g_per_kwh", "mean"),
     MetricSpec("ls_original_workload", "workload/original_fraction/mean", "mean"),
     MetricSpec("ls_shifted_workload", "workload/shifted_fraction/mean", "mean"),
     MetricSpec("ls_norm_tasks_in_queue", "sla/queue_depth_normalized/mean", "mean"),
@@ -84,19 +84,19 @@ _MAX_SPECS = (
     MetricSpec("ls_tasks_in_queue", "sla/queue_depth/max", "max"),
     MetricSpec("ls_norm_tasks_in_queue", "sla/queue_depth_normalized/max", "max"),
     MetricSpec("ls_oldest_task_age", "sla/oldest_task_age_fraction/max", "max"),
-    MetricSpec("ls_overdue_penalty", "sla/overdue_tasks/max", "max"),
+    MetricSpec("ls_overdue_penalty", "sla/overdue_tasks_per_step/max", "max"),
     MetricSpec("dc_int_temperature", "thermal/internal_temperature_c/max", "max"),
 )
 _LAST_SPECS = (
-    MetricSpec("ls_tasks_in_queue", "sla/queue_depth/final", "last"),
-    MetricSpec("ls_norm_tasks_in_queue", "sla/queue_depth_normalized/final", "last"),
+    
+    
     MetricSpec("bat_cumulative_cell_throughput_KWh", "battery/cumulative_cell_throughput_kwh", "last"),
     MetricSpec("bat_cumulative_degradation_cost_c", "battery/cumulative_degradation_cost_c", "last"),
     MetricSpec("bat_terminal_soc_reference_price_c_per_kwh", "battery/terminal_soc_reference_price_c_per_kwh", "last"),
     MetricSpec("billing_running_peak_kw", "tariff/billing/running_peak_kw", "last"),
     MetricSpec("billing_period_energy_kwh", "tariff/billing/energy_kwh", "last"),
     MetricSpec("billing_progress_fraction", "tariff/billing/progress_fraction", "last"),
-    MetricSpec("dc_thermal_limit_c", "thermal/limit", "last"),
+    MetricSpec("dc_thermal_limit_c", "thermal/crac_upper_bound_c", "last"),
 )
 
 
@@ -132,7 +132,7 @@ CONSOLE_SUMMARY_GROUPS: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]],
         (
             ("energy/grid_import_kwh", "grid", "kWh"),
             ("energy/baseline_without_battery_kwh", "no-bat", "kWh"),
-            ("energy/battery_delta_kwh", "bat-delta", "kWh"),
+            ("energy/grid_minus_gross_load_kwh", "grid-gross", "kWh"),
             ("pv/generation_ac_kwh", "pv", "kWh"),
             ("pv/curtailment_fraction", "pv-curtailed", ""),
         ),
@@ -144,9 +144,9 @@ CONSOLE_SUMMARY_GROUPS: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]],
             ("workload/original_fraction/mean", "orig", ""),
             ("workload/shifted_fraction/mean", "shifted", ""),
             ("sla/queue_depth/max", "queue-max", ""),
-            ("sla/queue_depth/final", "queue-end", ""),
-            ("sla/dropped_tasks", "dropped", ""),
-            ("sla/overdue_tasks/sum", "overdue", ""),
+            ("sla/queue_depth/last_sample", "queue-last", ""),
+            ("workload/queue_overflow_forced_tasks", "forced", ""),
+            ("sla/overdue_task_steps", "overdue", ""),
         ),
     ),
     (
@@ -155,16 +155,16 @@ CONSOLE_SUMMARY_GROUPS: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]],
         (
             ("thermal/internal_temperature_c/mean", "int", "C"),
             ("thermal/ambient_temperature_c/mean", "amb", "C"),
-            ("thermal/temperature_margin_c/min", "margin-min", "C"),
-            ("thermal/constraint_violation_steps", "clamp-steps", ""),
+            ("thermal/outlet_minus_crac_upper_bound_c/max", "outlet-upper-bound-max", "C"),
+            ("thermal/crac_clamp_steps", "clamp-steps", ""),
         ),
     ),
     (
         "battery",
         "Battery",
         (
-            ("battery/soc/start", "soc-start", ""),
-            ("battery/soc/end", "soc-end", ""),
+            ("battery/soc/first_post_step", "soc-first-post-step", ""),
+            ("battery/soc/last_post_step", "soc-last-post-step", ""),
             ("battery/action/charge_steps", "charge", "steps"),
             ("battery/action/discharge_steps", "discharge", "steps"),
             ("battery/cell_throughput_kwh", "throughput", "kWh"),
@@ -175,8 +175,8 @@ CONSOLE_SUMMARY_GROUPS: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]],
         "carbon",
         "Carbon/Water",
         (
-            ("carbon/emissions", "co2", "kg"),
-            ("carbon/grid_intensity", "CI", "g/kWh"),
+            ("carbon/emissions_kg", "co2", "kg"),
+            ("carbon/grid_intensity_g_per_kwh", "CI", "g/kWh"),
             ("water/liters", "water", "L"),
         ),
     ),
@@ -249,7 +249,13 @@ def format_console_summary(
 
 
 class FacilityMetricAccumulator:
-    """Aggregate one complete facility info dictionary per simulator step."""
+    """Online, bounded aggregation of one facility record per worker-step.
+
+    Historical carbon/emissions was grams despite a kg console label; the new
+    unit-suffixed metrics do not preserve that ambiguous tag. Historical
+    train/episode values pooled workers and are now named train/rollout.
+    SoC endpoints are post-step samples, not reset state or episode endpoints.
+    """
 
     def __init__(self, namespace: str, *, targeted_mode: bool = False) -> None:
         self.namespace = namespace.rstrip("/")
@@ -257,129 +263,115 @@ class FacilityMetricAccumulator:
         self.reset()
 
     def reset(self) -> None:
-        self._values: dict[str, list[float]] = defaultdict(list)
-        self._missing = 0
-        self._nonfinite = 0
-        self._steps = 0
+        self._stats = {}
+        self._missing = self._nonfinite = self._steps = 0
         self._actions = defaultdict(int)
 
-    def _add_spec(self, info: Mapping[str, object], spec: MetricSpec) -> None:
-        if spec.source_key not in info:
-            if self.targeted_mode and spec.required_in_targeted_mode:
-                raise KeyError(f"missing required targeted metric {spec.source_key}")
-            self._missing += 1
-            return
-        value = info[spec.source_key]
-        if not _finite_real(value):
-            self._nonfinite += 1
-            return
-        self._values[spec.canonical_suffix].append(float(value))
+    def _record(self, key, value):
+        value = float(value)
+        if key not in self._stats:
+            self._stats[key] = [0.0, 0, value, value, value, value]
+        stat = self._stats[key]
+        stat[0] += value
+        stat[1] += 1
+        stat[2] = min(stat[2], value)
+        stat[3] = max(stat[3], value)
+        stat[5] = value
 
     def add(self, info: Mapping[str, object]) -> None:
-        """Add one facility-level record, never a duplicate per-agent record."""
         self._steps += 1
         for spec in _SUM_SPECS + _MEAN_SPECS + _MAX_SPECS + _LAST_SPECS:
-            self._add_spec(info, spec)
+            if spec.source_key not in info:
+                if self.targeted_mode and spec.required_in_targeted_mode:
+                    raise KeyError(f"missing required targeted metric {spec.source_key}")
+                self._missing += 1
+                continue
+            value = info[spec.source_key]
+            if isinstance(value, (bool, np.bool_)) and spec.source_key in ("ls_enforced", "dc_constraint_violation"):
+                value = int(value)
+            if not _finite_real(value):
+                self._nonfinite += 1
+                continue
+            self._record(spec.canonical_suffix, value)
         action = info.get("bat_a_t")
-        if action in {"charge", "discharge", "idle"}:
-            self._actions[str(action)] += 1
-        elif action is not None:
-            self._missing += 1
-        if "bat_SOC" in info and _finite_real(info["bat_SOC"]):
-            self._values["battery/soc"].append(float(info["bat_SOC"]))
-        elif "bat_SOC" in info:
-            self._nonfinite += 1
-        else:
-            self._missing += 1
-        if "ls_tasks_in_queue" in info and _finite_real(info["ls_tasks_in_queue"]):
-            self._values["sla/queue_depth"].append(float(info["ls_tasks_in_queue"]))
-
-    def _metric(self, suffix: str, value: float) -> tuple[str, float]:
-        return f"{self.namespace}/{suffix}", float(value)
+        if isinstance(action, str) and action in {"charge", "discharge", "idle"}:
+            self._actions[action] += 1
+        for source, key in (("bat_SOC", "battery/soc"), ("ls_tasks_in_queue", "sla/queue_depth")):
+            if _finite_real(info.get(source)):
+                self._record(key, info[source])
+        # Only same-step finite pairs may contribute to derived ratios/margins.
+        for name, left, right in (("grid_gross", "bat_grid_import_kwh", "bat_total_energy_without_battery_KWh"),
+                                  ("pue", "dc_ITE_total_power_kW", "dc_HVAC_total_power_kW"),
+                                  ("outlet_setpoint", "dc_int_temperature", "dc_thermal_limit_c"),
+                                  ("carbon_grid", "bat_CO2_footprint", "bat_grid_import_kwh"),
+                                  ("water_grid", "dc_water_usage", "bat_grid_import_kwh"),
+                                  ("pv_self", "pv_self_consumed_kwh", "pv_ac_kwh"),
+                                  ("pv_curtail", "pv_curtailed_kwh", "pv_ac_kwh")):
+            if _finite_real(info.get(left)) and _finite_real(info.get(right)):
+                self._record("pair/" + name + "/left", info[left])
+                self._record("pair/" + name + "/right", info[right])
+                if name == "outlet_setpoint":
+                    self._record("pair/outlet_setpoint/difference", info[left] - info[right])
 
     def snapshot(self) -> dict[str, float]:
-        """Return reductions for all accumulated values without resetting them."""
-        result: dict[str, float] = {}
-        for specs, reduction in ((_SUM_SPECS, sum), (_MEAN_SPECS, np.mean), (_MAX_SPECS, max)):
+        result = {}
+        def put(key, value):
+            result[f"{self.namespace}/{key}"] = float(value)
+        last_specs = () if self.namespace.startswith("train/") else _LAST_SPECS
+        for specs, index in ((_SUM_SPECS, 0), (_MAX_SPECS, 3), (last_specs, 5)):
             for spec in specs:
-                values = self._values.get(spec.canonical_suffix)
-                if values:
-                    key, value = self._metric(spec.canonical_suffix, reduction(values))
-                    result[key] = value
-        for spec in _LAST_SPECS:
-            values = self._values.get(spec.canonical_suffix)
-            if values:
-                key, value = self._metric(spec.canonical_suffix, values[-1])
-                result[key] = value
-
-        soc_values = self._values.get("battery/soc", [])
-        if soc_values:
-            for suffix, value in (("battery/soc/start", soc_values[0]), ("battery/soc/end", soc_values[-1]), ("battery/soc/min", min(soc_values)), ("battery/soc/max", max(soc_values)), ("battery/soc/mean", np.mean(soc_values))):
-                key, numeric = self._metric(suffix, value)
-                result[key] = numeric
-        queue_values = self._values.get("sla/queue_depth", [])
-        if queue_values:
-            for suffix, value in (("sla/queue_depth/mean", np.mean(queue_values)), ("sla/queue_depth/max", max(queue_values)), ("sla/queue_depth/final", queue_values[-1]), ("sla/queue_task_steps", sum(queue_values))):
-                key, numeric = self._metric(suffix, value)
-                result[key] = numeric
-        for action in ("charge", "discharge", "idle"):
-            key, value = self._metric(f"battery/action/{action}_steps", self._actions[action])
-            result[key] = value
-
-        internal = self._values.get("thermal/internal_temperature_c/mean", [])
-        limit = self._values.get("thermal/limit", [])
-        if internal and limit:
-            paired = list(zip(internal, limit))
-            margins = [threshold - temperature for temperature, threshold in paired]
-            for suffix, value in (("thermal/temperature_margin_c/mean", np.mean(margins)), ("thermal/temperature_margin_c/min", min(margins)), ("thermal/exceedance_degree_c_steps", sum(max(0.0, -margin) for margin in margins))):
-                key, numeric = self._metric(suffix, value)
-                result[key] = numeric
-        constraint = self._values.get("thermal/constraint", [])
-        if constraint:
-            key, value = self._metric("thermal/constraint_violation_steps", sum(constraint))
-            result[key] = value
-
-        grid_import = sum(self._values.get("energy/grid_import_kwh", []))
-        baseline = sum(self._values.get("energy/baseline_without_battery_kwh", []))
-        if "energy/grid_import_kwh" in self._values:
-            key, value = self._metric("energy/battery_delta_kwh", grid_import - baseline)
-            result[key] = value
-        pv_generation = sum(self._values.get("pv/generation_ac_kwh", []))
-        if pv_generation > 0:
-            for suffix, value in (("pv/self_consumption_fraction", sum(self._values.get("pv/self_consumed_kwh", [])) / pv_generation), ("pv/curtailment_fraction", sum(self._values.get("pv/curtailed_kwh", [])) / pv_generation)):
-                key, numeric = self._metric(suffix, value)
-                result[key] = numeric
-        if grid_import > 0:
-            for suffix, value in (("carbon/emissions_per_grid_import_kwh", sum(self._values.get("carbon/emissions", [])) / grid_import), ("water/liters_per_grid_import_kwh", sum(self._values.get("water/liters", [])) / grid_import)):
-                key, numeric = self._metric(suffix, value)
-                result[key] = numeric
-        ite = self._values.get("power/ite_kw/mean", [])
-        hvac = self._values.get("power/hvac_kw/mean", [])
-        if ite and sum(ite) > 0:
-            key, value = self._metric("efficiency/pue", 1.0 + sum(hvac) / sum(ite))
-            result[key] = value
-
+                if spec.canonical_suffix in self._stats:
+                    put(spec.canonical_suffix, self._stats[spec.canonical_suffix][index])
+        for spec in _MEAN_SPECS:
+            st = self._stats.get(spec.canonical_suffix)
+            if st: put(spec.canonical_suffix, st[0] / st[1])
+        for key, prefix in (("battery/soc", "battery/soc"), ("sla/queue_depth", "sla/queue_depth")):
+            st = self._stats.get(key)
+            if st:
+                put(prefix + "/mean", st[0] / st[1]); put(prefix + "/max", st[3])
+                if key == "battery/soc":
+                    put(prefix + "/min", st[2])
+                    if not self.namespace.startswith("train/"):
+                        put(prefix + "/first_post_step", st[4]); put(prefix + "/last_post_step", st[5])
+                else:
+                    if not self.namespace.startswith("train/"):
+                        put(prefix + "/last_sample", st[5])
+                    put("sla/queue_task_steps", st[0])
+        if self._actions:
+            for action in ("charge", "discharge", "idle"):
+                put(f"battery/action/{action}_steps", self._actions[action])
+        def pair(name):
+            l = self._stats.get("pair/" + name + "/left")
+            r = self._stats.get("pair/" + name + "/right")
+            return (l[0], r[0]) if l and r else None
+        p = pair("grid_gross")
+        if p: put("energy/grid_minus_gross_load_kwh", p[0] - p[1])
+        p = pair("pue")
+        if p and p[0] > 0: put("efficiency/pue", 1 + p[1] / p[0])
+        st = self._stats.get("pair/outlet_setpoint/difference")
+        if st:
+            put("thermal/outlet_minus_crac_upper_bound_c/mean", st[0] / st[1]); put("thermal/outlet_minus_crac_upper_bound_c/max", st[3])
+        for name, suffix in (("carbon_grid", "carbon/emissions_g_per_grid_import_kwh"), ("water_grid", "water/liters_per_grid_import_kwh"), ("pv_self", "pv/self_consumption_fraction"), ("pv_curtail", "pv/curtailment_fraction")):
+            p = pair(name)
+            if p and p[1] > 0: put(suffix, p[0] / p[1])
+        st = self._stats.get("carbon/emissions_g")
+        if st: put("carbon/emissions_kg", st[0] / 1000)
         agent_sums = []
         for agent in ("ls", "dc", "bat"):
-            values = self._values.get(f"reward/agent_{agent}/sum", [])
-            if values:
-                total = sum(values)
-                agent_sums.append(total)
-                key, value = self._metric(f"reward/agent_{agent}/mean_per_step", np.mean(values))
-                result[key] = value
-        if agent_sums:
-            key, value = self._metric("reward/mean_across_agents/sum", np.mean(agent_sums))
-            result[key] = value
-            if self._steps:
-                key, value = self._metric("reward/mean_across_agents/mean_per_step", np.mean(agent_sums) / self._steps)
-                result[key] = value
-        values = self._values.get("reward/shared_tariff_reward/sum")
-        if values:
-            key, value = self._metric("reward/shared_tariff_reward/mean_per_step", np.mean(values))
-            result[key] = value
-        result[f"{self.namespace}/diagnostic/info_missing_key_count"] = float(self._missing)
-        result[f"{self.namespace}/diagnostic/nonfinite_metric_count"] = float(self._nonfinite)
-        result[f"{self.namespace}/diagnostic/step_count"] = float(self._steps)
+            st = self._stats.get(f"reward/agent_{agent}/sum")
+            if st:
+                agent_sums.append(st[0]); put(f"reward/agent_{agent}/mean_per_step", st[0] / st[1])
+        if len(agent_sums) == 3 and all(
+            self._stats[f"reward/agent_{agent}/sum"][1] == self._steps
+            for agent in ("ls", "dc", "bat")
+        ):
+            put("reward/mean_across_agents/sum", np.mean(agent_sums))
+            if self._steps: put("reward/mean_across_agents/mean_per_step", np.mean(agent_sums) / self._steps)
+        st = self._stats.get("reward/shared_tariff_reward/sum")
+        if st: put("reward/shared_tariff_reward/mean_per_step", st[0] / st[1])
+        put("diagnostic/info_missing_key_count", self._missing)
+        put("diagnostic/nonfinite_metric_count", self._nonfinite)
+        put("diagnostic/step_count", self._steps)
         return result
 
 

@@ -63,7 +63,7 @@ class SustainDCLogger(BaseLogger):
         # Per-episode accumulator. Rebuilt every episode so one episode's
         # facility metrics are always attributable to that episode.
         self.rollout_metrics = FacilityMetricAccumulator(
-            "train/episode",
+            "train/rollout",
             targeted_mode=targeted_mode,
         )
         # Interval accumulator. Spans every episode since the last reset, so
@@ -215,14 +215,16 @@ class SustainDCLogger(BaseLogger):
             episode_snapshot = self.rollout_metrics.snapshot()
             self._log_metrics(episode_snapshot, self.total_num_steps)
             if self.console_verbosity != "off":
-                print(f"Episode {self.episode} metrics:")
-                summary = format_console_summary(episode_snapshot, "train/episode")
+                print(f"Pooled rollout {self.episode} metrics:")
+                summary = format_console_summary(episode_snapshot, "train/rollout")
                 if summary:
                     print(summary)
 
-        if self.interval_metrics is not None:
-            interval_snapshot = self.interval_metrics.snapshot()
-            self._log_metrics(interval_snapshot, self.total_num_steps)
+    def flush_interval_metrics(self):
+        """Emit and reset the completed logging interval, including at close."""
+        if self.interval_metrics is not None and self.interval_metrics._steps:
+            self._log_metrics(self.interval_metrics.snapshot(), self.total_num_steps)
+            self.interval_metrics.reset()
 
     def reset_interval_metrics(self):
         """Reset the interval accumulator so the next interval starts fresh."""
@@ -237,7 +239,7 @@ class SustainDCLogger(BaseLogger):
             for tag, value in metrics.items():
                 self.writter.add_scalar(tag, value, global_step)
 
-    def console_summary_text(self, namespace="train/episode"):
+    def console_summary_text(self, namespace="train/rollout"):
         """Render the curated console summary for a metric namespace."""
         if self.rollout_metrics is None:
             return ""
@@ -262,6 +264,8 @@ class SustainDCLogger(BaseLogger):
         else:
             average_net_energy = 0
             average_ite_power = 0
+            average_ct_power = 0
+            average_chiller_power = 0
             average_hvac_power = 0
             average_CO2_footprint = 0
             total_water_usage = 0
@@ -281,18 +285,19 @@ class SustainDCLogger(BaseLogger):
         self.writter.add_scalar("metrics/Average Chiller Power", average_chiller_power, self.total_num_steps)  # Added
         self.writter.add_scalar("metrics/Average HVAC Power", average_hvac_power, self.total_num_steps)
 
-        PUE = 1 + average_hvac_power/average_ite_power
-        self.writter.add_scalar("metrics/Average PUE", PUE, self.total_num_steps)
+        if average_ite_power > 0:
+            PUE = 1 + average_hvac_power / average_ite_power
+            self.writter.add_scalar("metrics/Average PUE", PUE, self.total_num_steps)
 
-        self.writter.add_scalar("metrics/Average CO2 Footprint", average_CO2_footprint, self.total_num_steps)
+        self.writter.add_scalar("metrics/Average CO2 Footprint g per step", average_CO2_footprint, self.total_num_steps)
         self.writter.add_scalar("metrics/Total Water Usage", total_water_usage, self.total_num_steps)
         self.writter.add_scalar("metrics/Total Tasks in Queue", total_tasks_in_queue, self.total_num_steps)
-        self.writter.add_scalar("metrics/Total Tasks Dropped", total_tasks_dropped, self.total_num_steps)
+        self.writter.add_scalar("metrics/Queue Overflow Forced Tasks", total_tasks_dropped, self.total_num_steps)
 
         # Optionally, log to the console or to a file
         if self.console_verbosity != "off":
-            print(f"Episode {self.episode}: Avg Net Energy={average_net_energy:.3f}, Avg CO2={average_CO2_footprint:.3f}, Water Usage={total_water_usage:.3f}")
-            print(f"Tasks in Queue={total_tasks_in_queue:.3f}, Tasks Dropped={total_tasks_dropped:.3f}")
+            print(f"Episode {self.episode}: Avg Net Energy={average_net_energy:.3f}, Avg CO2 g/step={average_CO2_footprint:.3f}, Water Usage={total_water_usage:.3f}")
+            print(f"Tasks in Queue={total_tasks_in_queue:.3f}, Queue Overflow Forced Tasks={total_tasks_dropped:.3f}")
             if self.console_verbosity == "full":
                 summary = self.console_summary_text()
                 if summary:
@@ -362,6 +367,8 @@ class SustainDCLogger(BaseLogger):
         else:
             average_net_energy = 0
             average_ite_power = 0
+            average_ct_power = 0
+            average_chiller_power = 0
             average_hvac_power = 0
             average_CO2_footprint = 0
             total_water_usage = 0
@@ -381,19 +388,20 @@ class SustainDCLogger(BaseLogger):
         self.writter.add_scalar("eval_metrics/Average Chiller Power", average_chiller_power, self.total_num_steps)  # Added
         self.writter.add_scalar("eval_metrics/Average HVAC Power", average_hvac_power, self.total_num_steps)
         
-        PUE = 1 + average_hvac_power/average_ite_power
-        self.writter.add_scalar("eval_metrics/Average PUE", PUE, self.total_num_steps)
+        if average_ite_power > 0:
+            PUE = 1 + average_hvac_power / average_ite_power
+            self.writter.add_scalar("eval_metrics/Average PUE", PUE, self.total_num_steps)
         
-        self.writter.add_scalar("eval_metrics/Average CO2 Footprint", average_CO2_footprint, self.total_num_steps)
+        self.writter.add_scalar("eval_metrics/Average CO2 Footprint g per step", average_CO2_footprint, self.total_num_steps)
         self.writter.add_scalar("eval_metrics/Total Water Usage", total_water_usage, self.total_num_steps)
         self.writter.add_scalar("eval_metrics/Total Tasks in Queue", total_tasks_in_queue, self.total_num_steps)
-        self.writter.add_scalar("eval_metrics/Total Tasks Dropped", total_tasks_dropped, self.total_num_steps)
+        self.writter.add_scalar("eval_metrics/Queue Overflow Forced Tasks", total_tasks_dropped, self.total_num_steps)
 
         # Optionally, log to the console or to a file
         if self.is_off_policy:
             self.episode = (int(self.total_num_steps)//self.algo_args["train"]["episode_length"]//self.algo_args["train"]["n_rollout_threads"])
-        print(f"Episode {self.episode}: Avg Net Energy={average_net_energy:.3f}, Avg CO2={average_CO2_footprint:.3f}, Water Usage={total_water_usage:.3f}")
-        print(f"Tasks in Queue={total_tasks_in_queue:.3f}, Tasks Dropped={total_tasks_dropped:.3f}")
+        print(f"Episode {self.episode}: Avg Net Energy={average_net_energy:.3f}, Avg CO2 g/step={average_CO2_footprint:.3f}, Water Usage={total_water_usage:.3f}")
+        print(f"Tasks in Queue={total_tasks_in_queue:.3f}, Queue Overflow Forced Tasks={total_tasks_dropped:.3f}")
 
         # Reset metrics for the next episode
         self.eval_metrics = {
@@ -425,4 +433,5 @@ class SustainDCLogger(BaseLogger):
     
     def close(self):
         """Close the logger."""
+        self.flush_interval_metrics()
         super().close()

@@ -525,11 +525,13 @@ class SustainDC(gym.Env):
         "current_out_temp": OBS_PREFIX_LEN + 2,
         "next_out_temp": OBS_PREFIX_LEN + 3,
     }
-    # bat_state middle: current_workload, current_temperature, battery_soc
+    # bat_state middle: workload, temperature, SoC, previous gross DC load, billing peak
     BAT_IDX = {
         "current_workload": OBS_PREFIX_LEN + 0,
         "current_temperature": OBS_PREFIX_LEN + 1,
         "battery_soc": OBS_PREFIX_LEN + 2,
+        "previous_facility_load_ratio": OBS_PREFIX_LEN + 3,
+        "billing_peak_ratio": OBS_PREFIX_LEN + 4,
     }
 
     def _pv_feature_block(self):
@@ -657,7 +659,7 @@ class SustainDC(gym.Env):
         return dc_state
 
 
-    def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature, pv_features, price_features):
+    def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature, pv_features, price_features, previous_facility_load_kw):
         """
         Create the state of the battery environment.
 
@@ -694,13 +696,15 @@ class SustainDC(gym.Env):
                                           current_workload,
                                           current_temperature,
                                           battery_soc,
+                                          previous_facility_load_kw / (self.datacenter_capacity_mw * 1000.0),
+                                          self.price_m.state.running_peak_kw / (self.datacenter_capacity_mw * 1000.0),
                                           pv_features,
                                           price_features
                                         )))
         return bat_state
 
 
-    def reset(self):
+    def reset(self, *, seed=None, options=None):
         """
         Reset the environment.
 
@@ -712,6 +716,31 @@ class SustainDC(gym.Env):
             states (dict): Dictionary of states.
             infos (dict): Dictionary of infos.
         """
+        options = {} if options is None else options
+        if not isinstance(options, dict):
+            raise ValueError("reset options must be a dictionary")
+        if set(options) - {"init_day", "init_hour"}:
+            raise ValueError("unknown reset options")
+        fixed = bool(options)
+        if fixed:
+            if set(options) != {"init_day", "init_hour"}:
+                raise ValueError("fixed reset requires init_day and init_hour")
+            day, hour = options["init_day"], options["init_hour"]
+            if (isinstance(day, bool) or not isinstance(day, (int, np.integer))
+                    or isinstance(hour, bool) or not isinstance(hour, (int, np.integer))
+                    or not 0 <= day < 365 or not 0 <= hour < 24):
+                raise ValueError("init_day and init_hour must be valid integer clock values")
+            end_step = (day * 24 + hour + self.days_per_episode * 24) * 4
+            source_lengths = (365 * 96, len(self.workload_m.original_data),
+                              len(self.weather_m.original_temp_data),
+                              len(self.ci_m.original_data), len(self.pv_m.ac_kw))
+            # Managers advance even on the terminal step, so the endpoint itself
+            # must be addressable without wrapping.
+            if end_step >= min(source_lengths):
+                raise ValueError("fixed episode must fit within the source year")
+        if seed is not None:
+            self.seed(seed)
+
         # Reset termination and reward flags for all agents
         self.ls_terminated = self.dc_terminated = self.bat_terminated = False
         self.ls_truncated = self.dc_truncated = self.bat_truncated = False
@@ -719,7 +748,9 @@ class SustainDC(gym.Env):
 
         # Reset the managers. Ordinary resets intentionally start independent
         # billing episodes; price state is never implicitly carried.
-        if self.episode_start_policy == "valid_midnight":
+        if fixed:
+            random_init_day, random_init_hour = int(day), int(hour)
+        elif self.episode_start_policy == "valid_midnight":
             random_init_day = random.randint(0, 365 - self.days_per_episode)
             random_init_hour = 0
         elif self.sample_whole_year:
@@ -753,6 +784,7 @@ class SustainDC(gym.Env):
         bat_s, self.bat_info = self.bat_env.reset()
         self._episode_start_soc = self.bat_env.get_battery_soc()
         self._terminal_soc_settled = False
+        self._previous_facility_load_kw = 0.0
 
         current_workload = self.workload_m.get_current_workload()
         next_workload = self.workload_m.get_next_workload()
@@ -775,7 +807,7 @@ class SustainDC(gym.Env):
         # bat_state -> [time (sine/cosine enconded), battery SoC, current+future normalized CI]
         # self.bat_state = np.float32(np.hstack((t_i, bat_s, ci_i_future)))
         battery_soc = self.bat_env.get_battery_soc()
-        self.bat_state = self._create_bat_state(t_i, current_workload, battery_soc, ci_i, ci_i_future, ci_i_past, current_out_temperature, pv_features, price_features)
+        self.bat_state = self._create_bat_state(t_i, current_workload, battery_soc, ci_i, ci_i_future, ci_i_past, current_out_temperature, pv_features, price_features, self._previous_facility_load_kw)
 
         # Update ci in the battery environment
         self.bat_env.update_ci(ci_i_denorm, ci_i_future[0])
@@ -843,7 +875,8 @@ class SustainDC(gym.Env):
 
         # Perform actions for each agent and update their respective environments
         self._perform_actions(action_dict)
-    
+        self._previous_facility_load_kw = self.dc_info['dc_total_power_kW']
+
         # Step the managers (time, workload, weather, CI) (t+1)
         day, hour, t_i, terminal = self.t_m.step()
         workload = self.workload_m.step()
@@ -885,7 +918,7 @@ class SustainDC(gym.Env):
         self.dc_state = self._create_dc_state(t_i, workload, next_workload,  ci_i, ci_i_future, ci_i_past, norm_temp, next_out_temperature, pv_features, price_features)
 
         battery_soc = self.bat_env.get_battery_soc()
-        self.bat_state = self._create_bat_state(t_i, workload, battery_soc, ci_i, ci_i_future, ci_i_past, norm_temp, pv_features, price_features)
+        self.bat_state = self._create_bat_state(t_i, workload, battery_soc, ci_i, ci_i_future, ci_i_past, norm_temp, pv_features, price_features, self._previous_facility_load_kw)
 
         # Populate observation dictionary based on updated states
         obs = self._populate_observation_dict()

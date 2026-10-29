@@ -118,19 +118,19 @@ def test_accumulator_tracks_state_queue_actions_and_thermal_exceedance():
         dc_int_temperature=22.0, dc_thermal_limit_c=23.0,
     ))
     snapshot = accumulator.snapshot()
-    assert snapshot["train/rollout/battery/soc/start"] == 0.8
-    assert snapshot["train/rollout/battery/soc/end"] == 0.4
+    assert "train/rollout/battery/soc/first_post_step" not in snapshot
+    assert "train/rollout/battery/soc/last_post_step" not in snapshot
     assert snapshot["train/rollout/battery/soc/min"] == 0.4
     assert snapshot["train/rollout/battery/soc/max"] == 0.8
     assert abs(snapshot["train/rollout/battery/soc/mean"] - 0.6) < 1e-12
     assert snapshot["train/rollout/sla/queue_depth/mean"] == 3.0
     assert snapshot["train/rollout/sla/queue_depth/max"] == 4.0
-    assert snapshot["train/rollout/sla/queue_depth/final"] == 4.0
+    assert "train/rollout/sla/queue_depth/last_sample" not in snapshot
     assert snapshot["train/rollout/sla/queue_task_steps"] == 6.0
     assert snapshot["train/rollout/battery/action/charge_steps"] == 1.0
     assert snapshot["train/rollout/battery/action/discharge_steps"] == 1.0
-    assert snapshot["train/rollout/thermal/exceedance_degree_c_steps"] == 2.0
-    assert snapshot["train/rollout/thermal/constraint_violation_steps"] == 1.0
+    assert snapshot["train/rollout/thermal/outlet_minus_crac_upper_bound_c/max"] == 2.0
+    assert snapshot["train/rollout/thermal/crac_clamp_steps"] == 1.0
 
 
 def test_zero_denominator_ratios_are_omitted_and_nonfinite_is_diagnostic():
@@ -205,14 +205,15 @@ def test_rollout_logging_keeps_targeted_returns_separate():
 
     episode_rows = [
         row for row, _ in logger.writter.metric_rows
-        if "train/episode/reward/agent_ls/sum" in row
+        if "train/rollout/reward/agent_ls/sum" in row
     ]
     assert len(episode_rows) == 1
     logged = episode_rows[0]
-    assert logged["train/episode/reward/agent_ls/sum"] == -4.0
-    assert logged["train/episode/reward/agent_dc/sum"] == -3.0
-    assert logged["train/episode/reward/agent_bat/sum"] == -2.0
+    assert logged["train/rollout/reward/agent_ls/sum"] == -4.0
+    assert logged["train/rollout/reward/agent_dc/sum"] == -3.0
+    assert logged["train/rollout/reward/agent_bat/sum"] == -2.0
 
+    logger.flush_interval_metrics()
     # The interval namespace carries the same per-agent separation.
     interval_rows = [
         row for row, _ in logger.writter.metric_rows
@@ -240,10 +241,10 @@ def test_episode_metrics_are_retained_for_every_episode_not_only_logged_ones():
 
     episode_rows = [
         row for row, _ in logger.writter.metric_rows
-        if "train/episode/tariff/cost/total_c" in row
+        if "train/rollout/tariff/cost/total_c" in row
     ]
     assert len(episode_rows) == 3
-    assert [r["train/episode/tariff/cost/total_c"] for r in episode_rows] == [10.0, 20.0, 30.0]
+    assert [r["train/rollout/tariff/cost/total_c"] for r in episode_rows] == [10.0, 20.0, 30.0]
 
 
 def test_interval_metrics_accumulate_and_reset_on_demand():
@@ -258,11 +259,12 @@ def test_interval_metrics_accumulate_and_reset_on_demand():
         ))
         logger.episode_metrics_log()
 
+    logger.flush_interval_metrics()
     interval_rows = [
         row for row, _ in logger.writter.metric_rows
         if "train/interval/tariff/cost/total_c" in row
     ]
-    assert [r["train/interval/tariff/cost/total_c"] for r in interval_rows] == [10.0, 20.0, 30.0]
+    assert [r["train/interval/tariff/cost/total_c"] for r in interval_rows] == [30.0]
 
     logger.reset_interval_metrics()
     logger.episode_init(4)
@@ -272,6 +274,7 @@ def test_interval_metrics_accumulate_and_reset_on_demand():
         dones=np.zeros((1, 3, 1), dtype=bool),
     ))
     logger.episode_metrics_log()
+    logger.flush_interval_metrics()
     interval_rows = [
         row for row, _ in logger.writter.metric_rows
         if "train/interval/tariff/cost/total_c" in row
@@ -298,7 +301,7 @@ def test_console_summary_reports_curated_headline_metrics():
     ))
     text = logger.console_summary_text()
     assert "Tariff" in text
-    assert "890" in text
+    assert "890" not in text  # A pooled worker's last billing peak is not an endpoint.
     assert "queue-max" in text
     assert "21.50C" in text
     assert "18.00C" in text
@@ -390,6 +393,55 @@ def test_aggregate_snapshots_reports_mean_standard_deviation_minimum_and_maximum
     assert aggregates[f"{prefix}/min"] == 10.0
     assert aggregates[f"{prefix}/max"] == 30.0
 
+
+
+def test_units_pairs_and_bounded_memory():
+    acc = FacilityMetricAccumulator("test")
+    acc.add({"bat_CO2_footprint": 1500, "bat_grid_import_kwh": 2,
+             "ls_tasks_dropped": 3, "ls_overdue_penalty": 4,
+             "dc_int_temperature": 30, "dc_thermal_limit_c": float("nan")})
+    acc.add({"bat_grid_import_kwh": 10, "dc_thermal_limit_c": 20,
+             "dc_ITE_total_power_kW": 5})
+    result = acc.snapshot()
+    assert result["test/carbon/emissions_kg"] == 1.5
+    assert result["test/carbon/emissions_g_per_grid_import_kwh"] == 750
+    assert result["test/workload/queue_overflow_forced_tasks"] == 3
+    assert result["test/sla/overdue_task_steps"] == 4
+    assert "test/energy/grid_minus_gross_load_kwh" not in result
+    assert "test/thermal/outlet_minus_crac_upper_bound_c/max" not in result
+    assert "test/efficiency/pue" not in result
+    size = len(acc._stats)
+    for _ in range(10000): acc.add({"bat_grid_import_kwh": 1})
+    assert len(acc._stats) == size
+
+
+
+def test_missing_actions_rewards_and_pooled_endpoints_are_not_invented():
+    acc = FacilityMetricAccumulator("train/rollout")
+    acc.add({"bat_SOC": 0.2, "ls_tasks_in_queue": 2, "agent_ls_reward": 1})
+    acc.add({"bat_SOC": 0.9, "ls_tasks_in_queue": 3, "agent_dc_reward": 2, "agent_bat_reward": 3})
+    result = acc.snapshot()
+    assert "train/rollout/battery/action/idle_steps" not in result
+    assert "train/rollout/reward/mean_across_agents/sum" not in result
+    assert "train/rollout/battery/soc/last_post_step" not in result
+    assert "train/rollout/sla/queue_depth/last_sample" not in result
+
+
+def test_interval_flush_once_and_final_partial_flush():
+    logger = _logger_with_fake_writer()
+    logger.init(episodes=3)
+    for episode in (1, 2, 3):
+        logger.episode_init(episode)
+        logger.per_step(_training_data(
+            rewards=np.zeros((1, 3, 1)), infos=[[_info(total_price_cost_this_step_c=episode)] * 3],
+            dones=np.zeros((1, 3, 1), dtype=bool)))
+        if episode == 2:
+            logger.flush_interval_metrics()
+            logger.flush_interval_metrics()
+    logger.flush_interval_metrics()
+    rows = [row["train/interval/tariff/cost/total_c"] for row, _ in logger.writter.metric_rows
+            if "train/interval/tariff/cost/total_c" in row]
+    assert rows == [3, 3]
 
 if __name__ == "__main__":
     sys.exit(1 if run_module_tests(globals()) else 0)

@@ -29,14 +29,14 @@ class SustainDCPettingZooEnv(ParallelEnv):
         if env_config['nonoverlapping_shared_obs_space']:
             # The shared obs is built in harlsustaindc_env._create_shared_observation
             # as: the whole ls_state, + 2 dc_state features not already in it
-            # (next_workload, next_exterior_temp), + 1 bat_state feature
-            # (battery SOC). DERIVED from the ls space rather than hardcoded, so
-            # adding features to the agent states (e.g. the price block) can't
-            # silently desync this from the data actually produced.
-            shared_dim = max(space.shape[0] for space in self.observation_spaces.values()) + 2 + 1  # pick largest observation space and add 2 for next_workload and next_exterior_temp, and 1 for battery SOC
+            # (next_workload, next_exterior_temp), + 3 bat_state features
+            # (SOC, previous facility load, uncapped billing peak).
+            shared_dim = max(space.shape[0] for space in self.observation_spaces.values()) + 2 + 3
             if env_config.get("state_type", "EP") == "FP":
                 shared_dim += len(self.possible_agents)
-            self.share_observation_space = {agent: spaces.Box(low=-2.0, high=2.0, shape=(shared_dim,), dtype=np.float32) for agent in self.possible_agents}
+            shared_high = np.full(shared_dim, 2.0, dtype=np.float32)
+            shared_high[len(self.observation_spaces[self.possible_agents[0]].high) + 4] = 10.0
+            self.share_observation_space = {agent: spaces.Box(low=-2.0, high=shared_high, dtype=np.float32) for agent in self.possible_agents}
         else:
             # Find the maximum dimension of observation space
             max_obs_dim = max(space.shape[0] for space in self.observation_spaces.values())
@@ -63,11 +63,13 @@ class SustainDCPettingZooEnv(ParallelEnv):
         Returns:
             dict: Initial observations for all agents.
         """
-        if seed is not None:
-            np.random.seed(seed)  # Example of setting seed, adjust based on your environment's requirements
-        
-        # initial_observation should be a dictionary with agent names as keys and their observations as values
-        initial_observations_with_info = self.env.reset()
+        if not options:
+            # Preserve the historical wrapper behavior for legacy training.
+            if seed is not None:
+                np.random.seed(seed)
+            initial_observations_with_info = self.env.reset()
+        else:
+            initial_observations_with_info = self.env.reset(seed=seed, options=options)
         return initial_observations_with_info  # , []
 
     def step(self, actions):
