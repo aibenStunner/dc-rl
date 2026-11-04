@@ -73,7 +73,7 @@ def test_real_sustaindc_exposes_battery_fidelity_metrics_with_peak_context():
     }
     assert required <= set(battery_info)
     assert all(np.isfinite(battery_info[key]) for key in required)
-    assert [observations[agent].shape[0] for agent in env.agents] == [40, 28, 29]
+    assert [observations[agent].shape[0] for agent in env.agents] == [40, 29, 29]
 
 
 def test_rte_derives_symmetric_one_way_efficiency():

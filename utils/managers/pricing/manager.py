@@ -114,9 +114,9 @@ class PriceManager:
             )
             _validate_model_state(self.state)
             charges = self._validate_charges(charges_result)
-            billing_energy_before = state_before.billing_period_energy_kwh
-            # Billing-period energy is common manager state.  Assign from the
-            # pre-step value so a model cannot double-count it accidentally.
+            # A pricing model may open a new calendar billing period before
+            # charging this reading. Its period energy is authoritative here.
+            billing_energy_before = self.state.billing_period_energy_kwh
             self.state.billing_period_energy_kwh = billing_energy_before + energy_kwh
             observation = self._validate_observation(
                 self.model.observe(context=self.context, state=self.state, clock=clock)

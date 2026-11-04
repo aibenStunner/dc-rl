@@ -51,16 +51,16 @@ def test_reset_does_not_implicitly_carry_billing_state():
     """Independent episode resets must start a fresh billing period unless a
     chronological caller explicitly supplies carry state."""
     manager = _manager("hydro_quebec")
-    manager.reset(init_day=100, init_hour=0.0)
-    manager.step(metered_energy_kwh=900.0 * 0.25, day_of_year=100, hour=0.0)
+    manager.reset(init_day=334, init_hour=0.0)
+    manager.step(metered_energy_kwh=900.0 * 0.25, day_of_year=334, hour=0.0)
     carry = manager.export_carry_state()
-    assert manager.state.running_peak_kw == 900.0
+    assert carry == {"winter_peak_kw": 900.0}
 
-    manager.reset(init_day=200, init_hour=0.0)
+    manager.reset(init_day=0, init_hour=0.0)
     assert manager.state.running_peak_kw == 0.0
 
-    manager.reset(init_day=200, init_hour=0.0, carry_state=carry)
-    assert manager.state.running_peak_kw == 900.0
+    manager.reset(init_day=0, init_hour=0.0, carry_state=carry)
+    assert math.isclose(manager.state.running_peak_kw, 0.65 * 900.0)
 
 
 def test_negative_meter_energy_is_rejected_before_state_mutates():
@@ -216,17 +216,18 @@ def test_exported_carry_state_round_trips():
         _config("hydro_quebec"), datacenter_capacity_mw=2.0,
         future_steps=4, timestep_minutes=15,
     )
-    manager.reset(init_day=100, init_hour=0.0)
-    manager.step(metered_energy_kwh=100.0, day_of_year=100, hour=0.0)
+    manager.reset(init_day=334, init_hour=0.0)
+    manager.step(metered_energy_kwh=100.0, day_of_year=334, hour=0.0)
     carry = manager.export_carry_state()
+    assert carry == {"winter_peak_kw": 400.0}
 
     restored = PriceManager.from_config(
         _config("hydro_quebec"), datacenter_capacity_mw=2.0,
         future_steps=4, timestep_minutes=15,
     )
-    restored.reset(init_day=100, init_hour=0.0, carry_state=carry)
+    restored.reset(init_day=0, init_hour=0.0, carry_state=carry)
     assert restored.export_carry_state() == carry
-    assert restored.get_normalized_peak() == manager.get_normalized_peak()
+    assert math.isclose(restored.get_normalized_peak(), 0.65 * 400.0 / 2000.0)
 
 
 def test_rate_m_threshold_straddling_is_counted_once_by_manager():
@@ -247,7 +248,7 @@ def test_optional_pending_period_settlement_updates_standardized_getters():
             "pricing": {
                 "model": "hydro_quebec",
                 "config_file": str(_HYDRO_CONFIG),
-                "options": {"tariff": "rate_l", "demand_floor_kw": 0.0},
+                "options": {"tariff": "rate_l", "demand_floor_kw": 6000.0},
             }
         },
         _REPO_ROOT,
@@ -255,7 +256,7 @@ def test_optional_pending_period_settlement_updates_standardized_getters():
     manager = PriceManager.from_config(
         config, datacenter_capacity_mw=20.0, future_steps=4, timestep_minutes=15,
     )
-    manager.reset(init_day=334, init_hour=12.0, carry_state={"ending_peak_kw": 6000.0})
+    manager.reset(init_day=334, init_hour=12.0)
     manager.step(metered_energy_kwh=7000.0 * 0.25, day_of_year=334, hour=12.0)
     charges = manager.settle_pending_period()
     assert charges.energy_cost_c == 0.0

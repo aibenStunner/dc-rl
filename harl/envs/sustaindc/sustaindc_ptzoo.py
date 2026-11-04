@@ -28,14 +28,14 @@ class SustainDCPettingZooEnv(ParallelEnv):
         
         if env_config['nonoverlapping_shared_obs_space']:
             # The shared obs is built in harlsustaindc_env._create_shared_observation
-            # as: the whole ls_state, + 2 dc_state features not already in it
-            # (next_workload, next_exterior_temp), + 3 bat_state features
+            # as: the whole ls_state, + 3 dc_state features not already in it
+            # (next_workload, next_exterior_temp, setpoint), + 3 bat_state features
             # (SOC, previous facility load, uncapped billing peak).
-            shared_dim = max(space.shape[0] for space in self.observation_spaces.values()) + 2 + 3
+            shared_dim = max(space.shape[0] for space in self.observation_spaces.values()) + 3 + 3
             if env_config.get("state_type", "EP") == "FP":
                 shared_dim += len(self.possible_agents)
             shared_high = np.full(shared_dim, 2.0, dtype=np.float32)
-            shared_high[len(self.observation_spaces[self.possible_agents[0]].high) + 4] = 10.0
+            shared_high[len(self.observation_spaces[self.possible_agents[0]].high) + 5] = 10.0
             self.share_observation_space = {agent: spaces.Box(low=-2.0, high=shared_high, dtype=np.float32) for agent in self.possible_agents}
         else:
             # Find the maximum dimension of observation space

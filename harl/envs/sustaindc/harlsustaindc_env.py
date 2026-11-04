@@ -89,11 +89,12 @@ class HARLSustainDCEnv:
             
             # The whole information available without repeating the same information
             concat_states.extend(states[0]) # ls_state
-            # dc_state (next_workload and next_exterior_temp) and bat_state
+            # dc_state (next_workload, next_exterior_temp, setpoint) and bat_state
             # (SOC, previous load, uncapped billing peak), picked by POSITION.
             # Keep these indices tied to the state builder in SustainDC.
             concat_states.extend([states[1][SustainDC.DC_IDX["next_workload"]],
-                                  states[1][SustainDC.DC_IDX["next_out_temp"]]])
+                                  states[1][SustainDC.DC_IDX["next_out_temp"]],
+                                  states[1][SustainDC.DC_IDX["setpoint_ratio"]]])
             concat_states.extend([states[2][SustainDC.BAT_IDX[key]] for key in (
                 "battery_soc", "previous_facility_load_ratio", "billing_peak_ratio"
             )])

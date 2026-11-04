@@ -20,10 +20,16 @@ from harl.algorithms.actors import ALGO_REGISTRY
 from harl.algorithms.critics.v_critic import VCritic
 from harl.envs.sustaindc.harlsustaindc_env import HARLSustainDCEnv
 from harl.envs.sustaindc.metrics import FacilityMetricAccumulator, build_trace_row, write_trace_csv
+from utils.managers.pricing.models.hydro_quebec import _MONTH_START_DAYS
 
 AGENTS = ('agent_ls', 'agent_dc', 'agent_bat')
-WINDOWS = {'winter': 14, 'spring': 105, 'summer': 196, 'autumn': 287}
-MODES = ('checkpoint', 'noop', 'checkpoint-battery-idle')
+WINDOWS = {'winter': 0, 'spring': 90, 'summer': 181, 'autumn': 273}
+
+
+def month_steps(start_day):
+    index = _MONTH_START_DAYS.index(start_day)
+    return ((*_MONTH_START_DAYS[1:], 365)[index] - start_day) * 96
+MODES = ('checkpoint', 'noop', 'cold-noop', 'checkpoint-battery-idle')
 ROOT = Path(__file__).resolve().parent
 
 
@@ -57,6 +63,27 @@ def paired_difference(candidate, baseline):
         and math.isfinite(float(value))
         and math.isfinite(float(baseline[key]))
     }
+
+
+def build_paired_comparisons(summaries, windows, modes):
+    """Compare evaluated controllers against each available fixed baseline."""
+    pairs = []
+    for window in windows:
+        group = {s['mode']: s for s in summaries if s['window'] == window}
+        for baseline in ('noop', 'cold-noop'):
+            if baseline not in group:
+                continue
+            for mode in modes:
+                if mode == baseline or mode not in group:
+                    continue
+                if baseline == 'cold-noop' and mode == 'noop':
+                    continue
+                pairs.append({
+                    'window': window,
+                    'comparison': mode + ' minus ' + baseline,
+                    'differences': paired_difference(group[mode], group[baseline]),
+                })
+    return pairs
 
 
 def reconcile_summary_against_trace(rows, summary):
@@ -109,10 +136,16 @@ def load_checkpoint(run, env):
     return actors, {str(p.resolve()): digest(p) for p in [config_path, *files]}
 
 
-def choose_actions(mode, actors, observations, states, masks, avail):
+def choose_actions(mode, actors, observations, states, masks, avail,
+                   dc_setpoint=None, dc_min_setpoint=None):
     proposed = []
     if mode == 'noop':
         return [1, 1, 2], [1, 1, 2]
+    if mode == 'cold-noop':
+        if dc_setpoint is None or dc_min_setpoint is None:
+            raise ValueError('cold-noop requires current and minimum DC setpoints')
+        actions = [1, 0 if dc_setpoint > dc_min_setpoint else 1, 2]
+        return actions, actions.copy()
     with torch.no_grad():
         for i, actor in enumerate(actors):
             action, state = actor.act(np.asarray(observations[i])[None], states[i], masks[i], np.asarray(avail[i])[None], deterministic=True)
@@ -124,8 +157,12 @@ def choose_actions(mode, actors, observations, states, masks, avail):
     return proposed, executed
 
 
-def run_episode(config, actors, mode, day, seed, max_steps=2880):
-    env = HARLSustainDCEnv(config['env_args'])
+def run_episode(config, actors, mode, day, seed, max_steps=None):
+    expected_steps = month_steps(day)
+    if max_steps is None:
+        max_steps = expected_steps
+    env_args = dict(config['env_args'], episode_start_policy='calendar_month')
+    env = HARLSustainDCEnv(env_args)
     try:
         obs, _, avail = env.reset(seed=seed, options={'init_day': day, 'init_hour': 0})
         raw = env.env.unwrapped.env
@@ -138,7 +175,11 @@ def run_episode(config, actors, mode, day, seed, max_steps=2880):
         for step in range(max_steps):
             common = raw.infos['__common__']
             exo = (float(common['workload']), float(common['weather']), float(common['ci']), float(raw.pv_m.get_current_ac_kwh()))
-            proposed, executed = choose_actions(mode, actors, obs, states, masks, avail)
+            proposed, executed = choose_actions(
+                mode, actors, obs, states, masks, avail,
+                dc_setpoint=raw.dc_env.raw_curr_stpt,
+                dc_min_setpoint=raw.dc_env.min_temp,
+            )
             padded_obs, _, term, trunc, info = env.env.step(dict(zip(AGENTS, executed)))
             obs = [padded_obs[a] for a in AGENTS]
             values = info[AGENTS[0]]
@@ -153,11 +194,11 @@ def run_episode(config, actors, mode, day, seed, max_steps=2880):
             rows.append(row)
             exogenous.append(exo)
             if terminated or truncated:
-                if step != 2879 or terminated or not truncated:
+                if step != expected_steps - 1 or terminated or not truncated:
                     raise RuntimeError(f'unexpected episode end at step {step + 1}: terminated={term}, truncated={trunc}')
                 break
-        if max_steps == 2880 and (len(rows) != 2880 or not rows[-1]['truncated']):
-            raise RuntimeError('episode did not truncate exactly at 2880 steps')
+        if max_steps == expected_steps and (len(rows) != expected_steps or not rows[-1]['truncated']):
+            raise RuntimeError(f'episode did not truncate exactly at {expected_steps} steps')
         summary = metrics.snapshot()
         for row in rows:
             def number(key):
@@ -191,7 +232,7 @@ def run_episode(config, actors, mode, day, seed, max_steps=2880):
             'initial_soc': initial_soc,
             'final_soc': float(raw.bat_env.get_battery_soc()),
             'steps': len(rows),
-            'complete': len(rows) == 2880,
+            'complete': len(rows) == expected_steps,
             'start_clock': [rows[0].get('billed_day'), rows[0].get('billed_hour')],
             'end_clock': [rows[-1].get('next_state_day'), rows[-1].get('next_state_hour')],
         })
@@ -229,6 +270,15 @@ def evaluate_scenarios(config, run, windows, modes, seed, smoke_steps):
     return summaries, hashes, traces
 
 
+def validate_saved_scenario(env_args):
+    """Check that matched windows represent the supported joint scenario."""
+    if (env_args.get('agents') != list(AGENTS)
+            or env_args.get('datacenter_capacity_mw') not in (1, 10)
+            or env_args.get('days_per_episode') != 30
+            or env_args.get('pricing', {}).get('model') != 'hydro_quebec'):
+        raise ValueError('expected three agents, 1 or 10 MW, 30-day saved configuration and Hydro-Québec pricing')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('run', type=Path, help='saved run containing config.json and models/')
@@ -236,10 +286,10 @@ def main():
     p.add_argument('--seed', type=int, default=102)
     p.add_argument('--window', choices=WINDOWS, action='append')
     p.add_argument('--mode', choices=MODES, action='append')
-    p.add_argument('--smoke-steps', type=int, default=2880, help='short diagnostic only; incomplete results are not evaluations')
+    p.add_argument('--smoke-steps', type=int, help='short diagnostic only; incomplete results are not evaluations')
     args = p.parse_args()
-    if not 1 <= args.smoke_steps <= 2880:
-        p.error('smoke steps must be in 1..2880')
+    if args.smoke_steps is not None and not 1 <= args.smoke_steps < 31 * 96:
+        p.error('smoke steps must be in 1..2975')
     try:
         windows = unique_requested(args.window, WINDOWS, '--window')
         modes = unique_requested(args.mode, MODES, '--mode')
@@ -250,8 +300,10 @@ def main():
     if output_root == run or run in output_root.parents:
         p.error('output root must not be inside the saved run')
     config = json.loads((run / 'config.json').read_text())
-    if config['env_args']['agents'] != list(AGENTS) or config['env_args']['datacenter_capacity_mw'] != 10 or config['env_args']['days_per_episode'] != 30:
-        p.error('expected all three agents, 10 MW and 30-day saved configuration')
+    try:
+        validate_saved_scenario(config['env_args'])
+    except ValueError as error:
+        p.error(str(error))
     output_root.mkdir(parents=True, exist_ok=True)
     out = Path(tempfile.mkdtemp(prefix='matched-', dir=output_root))
     summaries, hashes, traces = evaluate_scenarios(
@@ -259,24 +311,14 @@ def main():
     )
     for (window, mode), rows in traces.items():
         write_trace_csv(rows, out / f'{window}-{mode}.csv')
-    pairs = []
-    for window in windows:
-        group = {s['mode']: s for s in summaries if s['window'] == window}
-        if 'noop' in group:
-            for mode in modes:
-                if mode != 'noop' and mode in group:
-                    pairs.append({
-                        'window': window,
-                        'comparison': mode + ' minus noop',
-                        'differences': paired_difference(group[mode], group['noop']),
-                    })
+    pairs = build_paired_comparisons(summaries, windows, modes)
     versions = {}
     for package in ('numpy', 'torch', 'gymnasium', 'pettingzoo', 'supersuit', 'pvlib'):
         try: versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError: versions[package] = None
     def git(*params):
         return subprocess.check_output(['git', '-C', str(ROOT), *params], text=True).strip()
-    provenance = {'checkpoint': str(run), 'hashes_sha256': hashes, 'checkout_commit': git('rev-parse', 'HEAD'), 'checkout_status': git('status', '--porcelain'), 'python': platform.python_version(), 'dependencies': versions, 'config': config, 'scenario_seed': args.seed, 'windows': WINDOWS, 'limitations': ['Fixed representative windows are not statistical samples.', 'No-op is not a rule-based controller.', 'Checkpoint training code revision is not established by this evaluation.', 'Actor-only inference; critic weights are validated but not used, and the value normalizer is not restored.', 'Grid-minus-gross-load includes PV and is not a battery-only counterfactual.', 'Smoke results are incomplete when smoke_steps < 2880.']}
+    provenance = {'checkpoint': str(run), 'hashes_sha256': hashes, 'checkout_commit': git('rev-parse', 'HEAD'), 'checkout_status': git('status', '--porcelain'), 'python': platform.python_version(), 'dependencies': versions, 'config': config, 'scenario_seed': args.seed, 'windows': WINDOWS, 'limitations': ['Fixed representative windows are not statistical samples.', 'No-op is not a rule-based controller.', 'Checkpoint training code revision is not established by this evaluation.', 'Actor-only inference; critic weights are validated but not used, and the value normalizer is not restored.', 'Grid-minus-gross-load includes PV and is not a battery-only counterfactual.', 'Smoke results are incomplete when smoke_steps is shorter than the calendar month.']}
     (out / 'provenance.json').write_text(json.dumps(provenance, indent=2, allow_nan=False))
     (out / 'summaries.json').write_text(json.dumps(summaries, indent=2, allow_nan=False))
     (out / 'paired-differences.json').write_text(json.dumps(pairs, indent=2, allow_nan=False))

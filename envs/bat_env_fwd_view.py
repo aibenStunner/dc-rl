@@ -51,6 +51,7 @@ class BatteryEnvFwd(gym.Env):
         self.ci_n = []
         self.dcload_max = env_config['dcload_max']
         self.dcload_min = env_config['dcload_min']
+        self.grid_import_peak_kw = None
         self._reset_episode_metrics()
 
     def _reset_episode_metrics(self):
@@ -68,6 +69,7 @@ class BatteryEnvFwd(gym.Env):
         self.battery.reset(initial_soc=self.initial_soc)
         self._reset_episode_metrics()
         self.dcload = self.dcload_min
+        self.grid_import_peak_kw = None
         self.raw_obs = self._hist_data_collector()
         self.temp_state = self._process_obs(self.raw_obs)
         return self.temp_state, self._info(action_id=-1, action_name='idle')
@@ -125,6 +127,11 @@ class BatteryEnvFwd(gym.Env):
     def set_dcload(self, dc_load):
         self.dcload = dc_load
 
+    def set_grid_import_peak_kw(self, peak_kw):
+        if isinstance(peak_kw, bool) or not math.isfinite(float(peak_kw)) or float(peak_kw) < 0.0:
+            raise ValueError('peak_kw must be finite and non-negative')
+        self.grid_import_peak_kw = float(peak_kw)
+
     def set_pv_ac_energy_kwh(self, pv_ac_kwh):
         if isinstance(pv_ac_kwh, bool) or not math.isfinite(float(pv_ac_kwh)) or float(pv_ac_kwh) < 0.0:
             raise ValueError("pv_ac_kwh must be finite and non-negative")
@@ -139,6 +146,11 @@ class BatteryEnvFwd(gym.Env):
     def _simulate_battery_operation(self, battery, action_name):
         if action_name == 'charge':
             requested_power = self.charging_rate_modifier(battery)
+            if self.grid_import_peak_kw is not None:
+                base_kw = self.dcload * 1000.0
+                pv_kw = self.pv_ac_kwh / self.STEP_HOURS
+                headroom_kw = max(0.0, self.grid_import_peak_kw - base_kw + pv_kw)
+                requested_power = min(requested_power, headroom_kw / 1000.0)
             return battery.charge(requested_power, self.STEP_HOURS)
         if action_name == 'discharge':
             requested_power = self.discharging_rate_modifier(battery)

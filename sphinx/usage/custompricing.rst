@@ -198,17 +198,24 @@ instance rather than in shared pricing state.
 Carry state and settlement
 --------------------------
 
-``PriceManager`` exports carry state at reset boundaries and restores it into
-the next episode. Hydro-Québec carry state includes winter peak demand and the
-ending billing peak. Models with a pending final-period charge may implement
-``settle_pending_period(state=...)``; SustainDC calls it on episode truncation
-before calculating the terminal reward.
+``PriceManager.reset`` starts a fresh billing state unless the caller passes
+``carry_state`` explicitly; SustainDC training and evaluation never do.
+Hydro-Québec bills each calendar month inside the episode that contains it, so
+its carry state holds only ``winter_peak_kw``, which sets the 65% winter
+ratchet for later months. Carry it only between chronologically consecutive
+month episodes; a peak from an unrelated episode is not part of this site's
+billing history. A carried ending peak is rejected because that month's demand
+has already been billed. Models with a pending final-period charge may
+implement ``settle_pending_period(state=...)``; SustainDC calls it on episode
+truncation before calculating the terminal reward.
 
 Limitations
 -----------
 
 The supplied Hydro-Québec model does not model supply-voltage credits,
-transformation losses, taxes, account fees, or a full rolling 12-month history
-that ages old winter peaks out. The proposed data-centre scenario is pending
+transformation losses, taxes, account fees, minimum-bill amounts, leap years,
+or a full rolling 12-month history that ages old winter peaks out. Independent
+month episodes do not reproduce a contiguous annual bill: without
+chronological carry, no earlier winter peak raises a month's demand floor. The proposed data-centre scenario is pending
 approval and its public parameterization is incomplete; use it only as an
 explicit scenario, not a current tariff.

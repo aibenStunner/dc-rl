@@ -127,7 +127,8 @@ def _size_scaling(config, target_mw, min_temp, max_temp, ambient):
             for i in range(count)]
         flow, rated = DataCenter.chiller_sizing(config, min_CRAC_setpoint=min_temp,
                                                 max_CRAC_setpoint=max_temp, max_ambient_temp=ambient)
-        config.CT_REFRENCE_AIR_FLOW_RATE, config.CT_FAN_REF_P = flow, rated
+        config.CT_REFRENCE_AIR_FLOW_RATE = flow
+        config.CHILLER_NOMINAL_COOLING_CAPACITY_W = rated
         dc = DataCenter.DataCenter_ITModel(count, config.RACK_SUPPLY_APPROACH_TEMP_LIST,
                                            config.RACK_CPU_CONFIG, config.MAX_W_PER_RACK, config)
         cpu, fan, outlet = dc.compute_datacenter_IT_load_outlet_temp([100.0] * count, max_temp)
@@ -135,7 +136,8 @@ def _size_scaling(config, target_mw, min_temp, max_temp, ambient):
         return_temp = DataCenter.calculate_avg_CRAC_return_temp(config.RACK_RETURN_APPROACH_TEMP_LIST, outlet)
         crac, tower, _, compressor, cw, ct = DataCenter.calculate_HVAC_power(
             max_temp, return_temp, ambient, it, config)
-        result = (it + tower + compressor, it, tower, compressor, crac, cw, ct)
+        result = (it + crac + tower + compressor + cw + ct,
+                  it, tower, compressor, crac, cw, ct)
         if not all(np.isfinite(result)) or result[0] <= 0:
             raise ValueError('Facility sizing produced nonfinite or nonpositive power')
         measured[key] = result
@@ -195,10 +197,11 @@ def _size_scaling(config, target_mw, min_temp, max_temp, ambient):
             'utilization': 1.0, 'crac_setpoint_c': max_temp,
             'min_crac_setpoint_c': min_temp, 'ambient_temperature_c': ambient,
             'it_mw': it / 1e6, 'tower_fan_mw': tower / 1e6,
-            'compressor_mw': compressor / 1e6, 'hvac_mw': (tower + compressor) / 1e6,
-            'excluded_crac_fan_mw': crac / 1e6, 'excluded_cw_pump_mw': cw / 1e6,
-            'excluded_ct_pump_mw': ct / 1e6,
-            'caveat': 'Modeled design rating, not a cap or independently validated site demand; CRAC fan and pumps excluded from meter.'}
+            'compressor_mw': compressor / 1e6,
+            'hvac_mw': (crac + tower + compressor + cw + ct) / 1e6,
+            'crac_fan_mw': crac / 1e6, 'cw_pump_mw': cw / 1e6,
+            'ct_pump_mw': ct / 1e6,
+            'caveat': 'Modeled design rating, not a cap or independently validated site demand; all computed cooling equipment is included in the meter.'}
 
 
 def make_dc_pyeplus_env(month : int = 1,
@@ -227,10 +230,9 @@ def make_dc_pyeplus_env(month : int = 1,
         use_ls_cpu_load (bool, optional): Use the cpu workload value from a separate Load Shifting agent. This turns of reading default cpu data. Defaults to False.
         num_sin_cos_vars (int, optional): Number of sin and cosine variable that will be added externally from the centralized data source
         facility_sizing_mode: 'legacy' retains historical sizing; 'scaling'
-            sizes whole racks to total IT plus tower fan and compressor at full
+            sizes racks to IT plus all modeled cooling equipment at full
             utilization, maximum setpoint, and location design ambient. This is
-            a modeled design rating, not a power cap. CRAC fan and pumps are
-            calculated by the model but excluded from the runtime meter.
+            a modeled design rating, not a power cap or site calibration.
     Returns:
         envs.dc_gym.dc_gymenv: The environment instantiated with the particular month.
     """
@@ -250,8 +252,8 @@ def make_dc_pyeplus_env(month : int = 1,
     ]
     # 14 + 3 price features (_price_feature_block) + 2 season features
     # (cos_day/sin_day) -- see sustaindc_env.py's state builders.
-    observation_space = spaces.Box(low=np.float32(-1.0*np.ones(28)),
-                                    high=np.float32(1.0*np.ones(28)),
+    observation_space = spaces.Box(low=np.float32(-1.0*np.ones(29)),
+                                    high=np.float32(1.0*np.ones(29)),
                                     )
 
     
@@ -311,7 +313,7 @@ def make_dc_pyeplus_env(month : int = 1,
     dc_config.sizing_metadata = sizing_metadata
     ctafr, ct_rated_load = DataCenter.chiller_sizing(dc_config, min_CRAC_setpoint=min_temp, max_CRAC_setpoint=max_temp, max_ambient_temp=max_amb_temperature)
     dc_config.CT_REFRENCE_AIR_FLOW_RATE = ctafr
-    dc_config.CT_FAN_REF_P = ct_rated_load
+    dc_config.CHILLER_NOMINAL_COOLING_CAPACITY_W = ct_rated_load
     
     
     # Perform sizing of ITE power and ambient temperature
@@ -339,8 +341,14 @@ def make_dc_pyeplus_env(month : int = 1,
 
     chiller_max_load = DataCenter.calculate_chiller_power(max_cooling_cap, max_load, highest_ambient_temp)
 
-    # This will be battery sizing
-    max_dc_power_w =  1.1*max(total_ite_pwr) + 1.1*ct_rated_load + 1.1*chiller_max_load # Watts
+    # Use the same air-cooled meter boundary for sizing and observation limits.
+    crac_fan_load = dc_config.CRAC_FAN_REF_P * (
+        dc_config.CRAC_SUPPLY_AIR_FLOW_RATE_pu
+        / dc_config.CRAC_REFRENCE_AIR_FLOW_RATE_pu)**3
+    chilled_water_pump_w = (dc_config.CW_PRESSURE_DROP * dc_config.CW_WATER_FLOW_RATE
+                            / dc_config.CW_PUMP_EFFICIENCY)
+    hvac_max_load = crac_fan_load + chiller_max_load + chilled_water_pump_w
+    max_dc_power_w = 1.1 * (max(total_ite_pwr) + hvac_max_load) # Watts
     
     # By carbon explorer paper, we need a battery to feed the DC by at least 1 hours, so we need the energy metric
     num_hours_battery = 1
@@ -360,8 +368,8 @@ def make_dc_pyeplus_env(month : int = 1,
         'Site Outdoor Air Drybulb Temperature(Environment)': [-10.0, 40.0], #6
         'Zone Thermostat Cooling Setpoint Temperature(West Zone)': [15.0, 30.0],  # reasonable range for setpoint; can be updated based on need #7
         'Zone Air Temperature(West Zone)':[0.9*min(dc_ambient_temp_list), 1.1*max(dc_ambient_temp_list)],
-        'Facility Total HVAC Electricity Demand Rate(Whole Building)':  [0.0, 1.1*ct_rated_load + 1.1*chiller_max_load],  # this is cooling tower power and chiller power
-        'Facility Total Electricity Demand Rate(Whole Building)': [0.9*min(total_ite_pwr), 1.1*max(total_ite_pwr) +  1.1*ct_rated_load + 1.1*chiller_max_load],  # TODO: This is not a part of the observation variables right now
+        'Facility Total HVAC Electricity Demand Rate(Whole Building)':  [0.0, 1.1*hvac_max_load],
+        'Facility Total Electricity Demand Rate(Whole Building)': [0.9*min(total_ite_pwr), 1.1*(max(total_ite_pwr) + hvac_max_load)],
         'Facility Total Building Electricity Demand Rate(Whole Building)':[0.9*min(total_ite_pwr), 1.1*max(total_ite_pwr)],  # this is it power
         
         'cpuUsage':[0.0, 1.0],

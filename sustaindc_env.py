@@ -24,6 +24,7 @@ from utils.managers.pricing.contracts import PricingCharges
 from utils.managers.pricing.loader import load_pricing_config
 from utils.managers.pricing.manager import PriceManager
 from utils.utils_cf import get_energy_variables, get_init_day, obtain_paths
+from utils.managers.pricing.models.hydro_quebec import _MONTH_START_DAYS
 
 _REPO_ROOT = Path(__file__).resolve().parent
 
@@ -106,6 +107,7 @@ class EnvConfig(dict):
             'round_trip_efficiency': 0.90,
             'degradation_cost_c_per_kwh': 5.78,
             'initial_soc': 0.0,
+            'peak_charge_headroom': False,
             'power_fraction': None,
             'duration_hours': None,
             'rated_power_mw': None,
@@ -180,8 +182,10 @@ def _targeted_reward_defaults():
         "ls_overdue_penalty_weight": 0.50,
         "ls_dropped_penalty_weight": 0.25,
         "ls_backlog_penalty_weight": 0.20,
+        "ls_terminal_backlog_penalty_weight": 0.0,
         "dc_thermal_penalty_weight": 0.75,
         "dc_constraint_penalty_weight": 0.40,
+        "dc_max_rack_inlet_c": 0.0,
     }
 
 
@@ -206,6 +210,8 @@ def _validate_env_config(config):
     if sizing_mode not in {'legacy', 'scaling'}:
         raise ValueError('facility_sizing.mode must be legacy or scaling')
     battery = config['battery']
+    if not isinstance(battery['peak_charge_headroom'], bool):
+        raise ValueError('battery.peak_charge_headroom must be a boolean')
     for key in ('power_fraction', 'duration_hours', 'rated_power_mw', 'capacity_mwh'):
         value = battery[key]
         if value is not None:
@@ -225,17 +231,17 @@ def _validate_env_config(config):
     mode = config["reward"]["mode"]
     if mode not in {"legacy", "team_tariff_targeted_safeguards"}:
         raise ValueError(f"reward.mode {mode!r} is unsupported")
-    if config["episode_start_policy"] not in {"legacy_random", "valid_midnight"}:
-        raise ValueError("episode_start_policy must be legacy_random or valid_midnight")
+    if config["episode_start_policy"] not in {"legacy_random", "valid_midnight", "calendar_month"}:
+        raise ValueError("episode_start_policy must be legacy_random, valid_midnight or calendar_month")
     _validate_fraction(config["flexible_load"], "flexible_load", upper_exclusive=0.9)
     if mode == "team_tariff_targeted_safeguards":
         if config["agents"] != ["agent_ls", "agent_dc", "agent_bat"]:
             raise ValueError(
                 "team_tariff_targeted_safeguards requires agents in LS, DC, battery order"
             )
-        if config["episode_start_policy"] != "valid_midnight":
+        if config["episode_start_policy"] not in {"valid_midnight", "calendar_month"}:
             raise ValueError(
-                "team_tariff_targeted_safeguards requires episode_start_policy: valid_midnight"
+                "team_tariff_targeted_safeguards requires valid_midnight or calendar_month"
             )
         for key, value in config["reward"].items():
             if key == "mode":
@@ -244,10 +250,6 @@ def _validate_env_config(config):
                 raise ValueError(f"reward.{key} must be finite and non-negative")
         if config["reward"]["scale"] == 0.0:
             raise ValueError("reward.scale must be positive")
-        if config["reward"]["degradation_cost_weight"] != 0.0:
-            raise ValueError(
-                "team_tariff_targeted_safeguards requires degradation_cost_weight: 0.0"
-            )
 
 
 def _validate_fraction(value, name, upper_exclusive):
@@ -492,7 +494,7 @@ class SustainDC(gym.Env):
         time_to_next_valley = valleys[0] if len(valleys) > 0 else len(ci_values)
 
         # Relative CI position
-        ci_percentile = (current_ci - ci_mean) / (ci_std + 1e-8)
+        ci_percentile = np.clip((current_ci - ci_mean) / (ci_std + 1e-8), -2.0, 2.0)
 
         # Assemble features
         ci_features = np.array([
@@ -524,6 +526,7 @@ class SustainDC(gym.Env):
         "next_workload": OBS_PREFIX_LEN + 1,
         "current_out_temp": OBS_PREFIX_LEN + 2,
         "next_out_temp": OBS_PREFIX_LEN + 3,
+        "setpoint_ratio": OBS_PREFIX_LEN + 4,
     }
     # bat_state middle: workload, temperature, SoC, previous gross DC load, billing peak
     BAT_IDX = {
@@ -652,6 +655,7 @@ class SustainDC(gym.Env):
                                          next_workload,
                                          current_out_temperature,
                                          next_out_temperature,
+                                         self.dc_env.raw_curr_stpt / self.dc_env.max_temp,
                                          pv_features,
                                          price_features,
                                         )))
@@ -730,13 +734,20 @@ class SustainDC(gym.Env):
                     or isinstance(hour, bool) or not isinstance(hour, (int, np.integer))
                     or not 0 <= day < 365 or not 0 <= hour < 24):
                 raise ValueError("init_day and init_hour must be valid integer clock values")
-            end_step = (day * 24 + hour + self.days_per_episode * 24) * 4
+            if self.episode_start_policy == "calendar_month":
+                if hour != 0 or day not in _MONTH_START_DAYS:
+                    raise ValueError("calendar_month reset requires a month-start midnight")
+                days = (*_MONTH_START_DAYS[1:], 365)[_MONTH_START_DAYS.index(day)] - day
+            else:
+                days = self.days_per_episode
+            end_step = (day + days) * 96 + hour * 4
             source_lengths = (365 * 96, len(self.workload_m.original_data),
                               len(self.weather_m.original_temp_data),
                               len(self.ci_m.original_data), len(self.pv_m.ac_kw))
             # Managers advance even on the terminal step, so the endpoint itself
             # must be addressable without wrapping.
-            if end_step >= min(source_lengths):
+            if (end_step > min(source_lengths) if self.episode_start_policy == "calendar_month"
+                    else end_step >= min(source_lengths)):
                 raise ValueError("fixed episode must fit within the source year")
         if seed is not None:
             self.seed(seed)
@@ -750,6 +761,9 @@ class SustainDC(gym.Env):
         # billing episodes; price state is never implicitly carried.
         if fixed:
             random_init_day, random_init_hour = int(day), int(hour)
+        elif self.episode_start_policy == "calendar_month":
+            random_init_day = random.choice(_MONTH_START_DAYS)
+            random_init_hour = 0
         elif self.episode_start_policy == "valid_midnight":
             random_init_day = random.randint(0, 365 - self.days_per_episode)
             random_init_hour = 0
@@ -762,7 +776,13 @@ class SustainDC(gym.Env):
             random_init_day = random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1]))
             random_init_hour = random.randint(0, 23)
         self.current_hour = random_init_hour
-        
+        if self.episode_start_policy == "calendar_month":
+            month_index = _MONTH_START_DAYS.index(random_init_day)
+            month_end = (*_MONTH_START_DAYS[1:], 365)[month_index]
+            self.t_m.simulated_total_timesteps = (month_end - random_init_day) * 96
+        else:
+            self.t_m.simulated_total_timesteps = self.days_per_episode * 96
+
         t_i = self.t_m.reset(init_day=random_init_day, init_hour=random_init_hour)
         workload = self.workload_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Workload manager
         temp, norm_temp, wet_bulb, norm_wet_bulb = self.weather_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # Weather manager
@@ -999,6 +1019,8 @@ class SustainDC(gym.Env):
             
         self.bat_env.set_dcload(self.dc_info['dc_total_power_kW'] / 1e3)
         self.bat_env.set_pv_ac_energy_kwh(self.pv_m.get_current_ac_kwh())
+        if self.battery_config['peak_charge_headroom']:
+            self.bat_env.set_grid_import_peak_kw(self.price_m.state.running_peak_kw)
         self.bat_state, _, self.bat_terminated, self.bat_truncated, self.bat_info = self.bat_env.step(action)
 
 

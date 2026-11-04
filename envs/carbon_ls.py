@@ -247,7 +247,7 @@ class CarbonLoadEnv(gym.Env):
             # available_capacity = 100 - (non_shiftable_tasks + shiftable_tasks)  # Remaining capacity
             if available_capacity >= 1:  # At least 1 task can be processed                
                 # Cap the number of tasks to process by the available capacity
-                tasks_to_process = min(shiftable_tasks, available_capacity, len(self.tasks_queue))
+                tasks_to_process = min(available_capacity, len(self.tasks_queue))
                 
                 actual_tasks_to_process = tasks_to_process  # Track for info
 
@@ -306,7 +306,7 @@ class CarbonLoadEnv(gym.Env):
                 'ls_oldest_task_age': oldest_task_age/24,
                 'ls_average_task_age': average_task_age/24,
                 'ls_overdue_penalty': overdue_penalty,
-                'ls_computed_tasks': int(self.current_utilization*100),
+                'ls_computed_tasks': round(self.current_utilization * 100),
                 'ls_task_age_histogram': task_age_histogram,}
 
 

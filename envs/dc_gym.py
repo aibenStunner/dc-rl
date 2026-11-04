@@ -74,7 +74,8 @@ class dc_gymenv(gym.Env):
         
         self.raw_curr_state = None
         self.raw_next_state = None
-        self.raw_curr_stpt = action_definition['cooling setpoints']['initial_value']
+        self.initial_setpoint = action_definition['cooling setpoints']['initial_value']
+        self.raw_curr_stpt = self.initial_setpoint
         self.max_temp = max_temp
         self.min_temp = min_temp
         
@@ -108,7 +109,8 @@ class dc_gymenv(gym.Env):
         self.HVAC_load = self.ranges['Facility Total HVAC Electricity Demand Rate(Whole Building)'][0]
         self.rackwise_cpu_pwr, self.rackwise_itfan_pwr, self.rackwise_outlet_temp = [], [], []
         self.water_usage = None
-        
+        self.raw_curr_stpt = self.initial_setpoint
+
         self.raw_curr_state = self.get_obs()
         
         self.consecutive_actions = 0
@@ -190,15 +192,16 @@ class dc_gymenv(gym.Env):
                                                                                                                                                                        ambient_temp=self.ambient_temp,
                                                                                                                                                                        data_center_full_load=data_center_total_ITE_Load,
                                                                                                                                                                        DC_Config=self.DC_Config)
-        self.HVAC_load = self.CT_Cooling_load + self.Compressor_load
+        self.HVAC_load = (self.CRAC_Fan_load + self.CT_Cooling_load + self.Compressor_load
+                          + self.CW_pump_load + self.CT_pump_load)
+        available_cooling_w = DataCenter.chiller_available_cooling_capacity(
+            self.DC_Config.CHILLER_NOMINAL_COOLING_CAPACITY_W, self.ambient_temp
+        )
+        unmet_cooling_w = max(0.0, self.CRAC_Cooling_load - available_cooling_w)
+        capacity_exceeded = float(unmet_cooling_w > 1e-6 * max(self.CRAC_Cooling_load, 1.0))
 
-        # Set the additional attributes for the cooling tower water usage calculation
-        self.dc.hot_water_temp = avg_CRAC_return_temp  # °C
-        self.dc.cold_water_temp = self.raw_curr_stpt  # °C
-        self.dc.wet_bulb_temp = self.wet_bulb  # °C from weather data
-
-        # Calculate the cooling tower water usage
-        self.water_usage = self.dc.calculate_cooling_tower_water_usage()
+        # The air-cooled plant has no evaporative cooling-tower water use.
+        self.water_usage = 0.0
 
         # calculate reward
         self.reward = 0
@@ -214,8 +217,12 @@ class dc_gymenv(gym.Env):
             'dc_ITE_total_power_kW': data_center_total_ITE_Load / 1e3,
             'dc_CT_total_power_kW': self.CT_Cooling_load / 1e3,
             'dc_Compressor_total_power_kW': self.Compressor_load / 1e3,
-            'dc_HVAC_total_power_kW': (self.CT_Cooling_load + self.Compressor_load) / 1e3,
-            'dc_total_power_kW': (data_center_total_ITE_Load + self.CT_Cooling_load + self.Compressor_load) / 1e3,
+            'dc_chiller_available_cooling_kW': available_cooling_w / 1e3,
+            'dc_unmet_cooling_kW': unmet_cooling_w / 1e3,
+            'dc_cooling_capacity_exceeded': capacity_exceeded,
+            'dc_steady_state_thermal_valid': 1.0 - capacity_exceeded,
+            'dc_HVAC_total_power_kW': self.HVAC_load / 1e3,
+            'dc_total_power_kW': (data_center_total_ITE_Load + self.HVAC_load) / 1e3,
             'dc_crac_setpoint_delta': crac_setpoint_delta,
             'dc_crac_setpoint': self.raw_curr_stpt,
             'dc_thermal_limit_c': self.max_temp,
@@ -224,11 +231,12 @@ class dc_gymenv(gym.Env):
             ),
             'dc_cpu_workload_fraction': self.cpu_load_frac,
             'dc_int_temperature': np.mean(self.rackwise_outlet_temp),
+            'dc_max_rack_inlet_c': max(self.dc.rackwise_inlet_temp),
             'dc_exterior_ambient_temp': self.ambient_temp,
             'dc_power_lb_kW': self.power_lb_kW,
             'dc_power_ub_kW': self.power_ub_kW,
-            'dc_CW_pump_power_kW': self.CW_pump_load,
-            'dc_CT_pump_power_kW': self.CT_pump_load,
+            'dc_CW_pump_power_kW': self.CW_pump_load / 1e3,
+            'dc_CT_pump_power_kW': self.CT_pump_load / 1e3,
             'dc_water_usage': self.water_usage,
         }
         

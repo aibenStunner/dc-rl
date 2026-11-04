@@ -188,9 +188,30 @@ def team_tariff_targeted_safeguards(
         config["ls_backlog_penalty_weight"]
         * values["ls_norm_tasks_in_queue"]
     )
-    dc_thermal_penalty = config["dc_thermal_penalty_weight"] * max(
-        0.0, values["dc_int_temperature"] - values["dc_thermal_limit_c"]
+    terminal_backlog_weight = _finite_nonnegative(
+        reward_config.get("ls_terminal_backlog_penalty_weight", 0.0),
+        "reward.ls_terminal_backlog_penalty_weight",
     )
+    terminal_backlog_tasks = _finite_nonnegative(
+        params.get("ls_tasks_in_queue", 0.0), "ls_tasks_in_queue"
+    )
+    ls_terminal_backlog_penalty = (
+        terminal_backlog_weight * terminal_backlog_tasks
+        if params.get("isterminal", False) else 0.0
+    )
+    inlet_limit = _finite_nonnegative(
+        reward_config.get("dc_max_rack_inlet_c", 0.0), "reward.dc_max_rack_inlet_c"
+    )
+    if inlet_limit:
+        inlet_temperature = _finite_nonnegative(
+            params["dc_max_rack_inlet_c"], "dc_max_rack_inlet_c"
+        )
+        thermal_excess = max(0.0, inlet_temperature - inlet_limit)
+    else:
+        thermal_excess = max(
+            0.0, values["dc_int_temperature"] - values["dc_thermal_limit_c"]
+        )
+    dc_thermal_penalty = config["dc_thermal_penalty_weight"] * thermal_excess
     dc_constraint_penalty = (
         config["dc_constraint_penalty_weight"]
         * values["dc_constraint_violation"]
@@ -208,6 +229,8 @@ def team_tariff_targeted_safeguards(
         "ls_overdue_penalty_component": ls_overdue_penalty,
         "ls_dropped_penalty_component": ls_dropped_penalty,
         "ls_backlog_penalty_component": ls_backlog_penalty,
+        "ls_terminal_backlog_tasks": terminal_backlog_tasks if params.get("isterminal", False) else 0.0,
+        "ls_terminal_backlog_penalty_component": ls_terminal_backlog_penalty,
         "dc_thermal_penalty_component": dc_thermal_penalty,
         "dc_constraint_penalty_component": dc_constraint_penalty,
         "bat_terminal_soc_penalty_component": bat_terminal_soc_penalty,
@@ -219,6 +242,7 @@ def team_tariff_targeted_safeguards(
             - ls_overdue_penalty
             - ls_dropped_penalty
             - ls_backlog_penalty
+            - ls_terminal_backlog_penalty
         ),
         "agent_dc": (
             shared_tariff_cost_reward

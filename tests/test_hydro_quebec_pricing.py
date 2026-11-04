@@ -195,6 +195,16 @@ def test_carry_state_rejects_unknown_keys_with_field_path():
         raise AssertionError("expected unknown carry_state key to fail")
 
 
+def test_carry_state_rejects_ending_peak_because_each_month_is_billed_once():
+    model, context = _model()
+    try:
+        _reset(model, context, carry={"winter_peak_kw": 0.0, "ending_peak_kw": 900.0})
+    except ValueError as exc:
+        assert "carry_state.ending_peak_kw" in str(exc), str(exc)
+    else:
+        raise AssertionError("expected carried ending peak to fail")
+
+
 def test_auto_selection_uses_threshold_and_never_selects_pending_rate():
     model, context = _model(tariff="auto", capacity_mw=4.999)
     state = _reset(model, context, tariff="auto")
@@ -268,6 +278,53 @@ def test_demand_charge_bills_only_running_peak_increments():
     assert state.model_state["ending_peak_kw"] == 900.0
 
 
+def test_calendar_month_rollover_resets_energy_and_charges_new_month_peak():
+    config = load_pricing_config({"pricing": {
+        "model": "hydro_quebec", "config_file": str(_CONFIG_FILE),
+        "options": {"tariff": "rate_m", "demand_floor_kw": 0.0},
+    }}, _REPO_ROOT)
+    manager = PriceManager.from_config(
+        config, datacenter_capacity_mw=1.0, timestep_minutes=15, future_steps=8)
+    manager.reset(init_day=30, init_hour=23.75)
+    january = manager.step(metered_energy_kwh=250.0, day_of_year=30, hour=23.75)
+    february = manager.step(metered_energy_kwh=225.0, day_of_year=31, hour=0.0)
+    assert math.isclose(january.demand_cost_increment_c, 1000.0 * 1824.2)
+    assert math.isclose(february.demand_cost_increment_c, 900.0 * 1824.2)
+    assert math.isclose(february.energy_cost_c, 225.0 * 6.292)
+    assert manager.state.billing_period_energy_kwh == 225.0
+    assert manager.state.running_peak_kw == 900.0
+
+
+def test_winter_peak_sets_next_month_ratchet_floor():
+    config = load_pricing_config({"pricing": {
+        "model": "hydro_quebec", "config_file": str(_CONFIG_FILE),
+        "options": {"tariff": "rate_m", "demand_floor_kw": 0.0},
+    }}, _REPO_ROOT)
+    manager = PriceManager.from_config(
+        config, datacenter_capacity_mw=1.0, timestep_minutes=15, future_steps=8)
+    manager.reset(init_day=30, init_hour=23.75)
+    manager.step(metered_energy_kwh=250.0, day_of_year=30, hour=23.75)
+    february = manager.step(metered_energy_kwh=25.0, day_of_year=31, hour=0.0)
+    assert math.isclose(manager.state.running_peak_kw, 650.0)
+    assert math.isclose(february.demand_cost_increment_c, 650.0 * 1824.2)
+
+
+def test_rate_l_minimum_demand_is_charged_once_per_month():
+    config = load_pricing_config({"pricing": {
+        "model": "hydro_quebec", "config_file": str(_CONFIG_FILE),
+        "options": {"tariff": "rate_l", "demand_floor_kw": 0.0},
+    }}, _REPO_ROOT)
+    manager = PriceManager.from_config(
+        config, datacenter_capacity_mw=10.0, timestep_minutes=15, future_steps=8)
+    manager.reset(init_day=30, init_hour=23.75)
+    first = manager.step(metered_energy_kwh=250.0, day_of_year=30, hour=23.75)
+    second = manager.step(metered_energy_kwh=250.0, day_of_year=31, hour=0.0)
+    third = manager.step(metered_energy_kwh=250.0, day_of_year=31, hour=0.25)
+    assert math.isclose(first.demand_cost_increment_c, 5000.0 * 1502.7)
+    assert math.isclose(second.demand_cost_increment_c, 5000.0 * 1502.7)
+    assert third.demand_cost_increment_c == 0.0
+
+
 def test_winter_ratchet_tracks_winter_peak_and_carries_to_next_period():
     model, context = _model()
     state = _reset(model, context, day=334)
@@ -280,7 +337,7 @@ def test_winter_ratchet_tracks_winter_peak_and_carries_to_next_period():
         )
     assert state.model_state["winter_peak_kw"] == 1200.0
     carry = model.export_carry_state(state)
-    assert carry == {"winter_peak_kw": 1200.0, "ending_peak_kw": 1200.0}
+    assert carry == {"winter_peak_kw": 1200.0}
 
     next_state = PricingState()
     model.reset(
@@ -290,24 +347,15 @@ def test_winter_ratchet_tracks_winter_peak_and_carries_to_next_period():
         carry_state=carry,
         options={"tariff": "rate_m", "demand_floor_kw": 0.0},
     )
-    # Existing PriceManager semantics carry the ending peak across episodes;
-    # the winter ratchet is only a fallback when no ending peak is carried.
-    assert next_state.running_peak_kw == 1200.0
+    assert next_state.running_peak_kw == 780.0
     assert next_state.model_state["winter_peak_kw"] == 1200.0
-
-
-def test_winter_ratchet_floor_applies_without_ending_peak_carry():
-    model, context = _model()
-    state = PricingState()
-    model.reset(
+    charges = model.step(
         context=context,
-        state=state,
+        state=next_state,
         clock=_clock(day=100),
-        carry_state={"winter_peak_kw": 1200.0, "ending_peak_kw": 0.0},
-        options={"tariff": "rate_m", "demand_floor_kw": 0.0},
+        reading=MeterReading(energy_kwh=500.0 * 0.25, demand_kw=500.0),
     )
-    assert state.running_peak_kw == 780.0
-    assert state.model_state["winter_peak_kw"] == 1200.0
+    assert math.isclose(charges.demand_cost_increment_c, 780.0 * 1824.2)
 
 
 def test_summer_demand_does_not_feed_winter_ratchet():
@@ -322,7 +370,7 @@ def test_summer_demand_does_not_feed_winter_ratchet():
     assert state.model_state["winter_peak_kw"] == 0.0
 
     carry = model.export_carry_state(state)
-    assert carry == {"winter_peak_kw": 0.0, "ending_peak_kw": 1800.0}
+    assert carry == {"winter_peak_kw": 0.0}
 
     next_state = PricingState()
     model.reset(
@@ -332,15 +380,14 @@ def test_summer_demand_does_not_feed_winter_ratchet():
         carry_state=carry,
         options={"tariff": "rate_m", "demand_floor_kw": 0.0},
     )
-    # Summer demand does not raise winter_peak_kw, but the observed ending
-    # peak still carries across the episode boundary.
-    assert next_state.running_peak_kw == 1800.0
+    assert next_state.running_peak_kw == 0.0
     assert next_state.model_state["winter_peak_kw"] == 0.0
 
 
 def test_rate_l_optimization_charge_is_winter_daily_overrun_only():
     model, context = _model(tariff="rate_l", capacity_mw=20.0)
-    state = _reset(model, context, day=100, tariff="rate_l", carry={"ending_peak_kw": 6000.0})
+    state = _reset(model, context, day=100, tariff="rate_l",
+                   demand_floor_kw=6000.0)
     summer_total = 0.0
     for index in range(96):
         charges = model.step(
@@ -371,7 +418,7 @@ def test_rate_l_noon_reset_settles_only_that_calendar_days_peak():
         context,
         day=334,
         tariff="rate_l",
-        carry={"ending_peak_kw": 6000.0},
+        demand_floor_kw=6000.0,
     )
     expected_charge = (7000.0 - 1.10 * 6000.0) * 880.8
 
@@ -403,7 +450,7 @@ def test_rate_l_settlement_uses_the_previous_days_winter_status():
         context,
         day=333,
         tariff="rate_l",
-        carry={"ending_peak_kw": 6000.0},
+        demand_floor_kw=6000.0,
     )
     model.step(
         context=context,
@@ -431,7 +478,7 @@ def test_rate_l_settlement_uses_the_previous_days_winter_status():
         context,
         day=89,
         tariff="rate_l",
-        carry={"ending_peak_kw": 6000.0},
+        demand_floor_kw=6000.0,
     )
     model.step(
         context=context,
@@ -462,7 +509,7 @@ def test_rate_l_settles_december_31_when_clock_wraps_to_january_1():
         context,
         day=364,
         tariff="rate_l",
-        carry={"ending_peak_kw": 6000.0},
+        demand_floor_kw=6000.0,
     )
     expected_charge = (7000.0 - 1.10 * 6000.0) * 880.8
     model.step(
@@ -490,7 +537,7 @@ def test_rate_l_explicit_boundary_settles_final_partial_day_once():
         context,
         day=334,
         tariff="rate_l",
-        carry={"ending_peak_kw": 6000.0},
+        demand_floor_kw=6000.0,
     )
     expected_charge = (7000.0 - 1.10 * 6000.0) * 880.8
     model.step(
@@ -711,7 +758,7 @@ def test_rate_l_minimum_billing_demand_initializes_running_peak():
         clock=_clock(),
         reading=MeterReading(energy_kwh=1000.0, demand_kw=4000.0),
     )
-    assert charges.demand_cost_increment_c == 0.0
+    assert math.isclose(charges.demand_cost_increment_c, 5000.0 * 1502.7)
 
 
 def test_rate_m_has_no_minimum_demand_without_carry_or_ratchet():

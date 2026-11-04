@@ -35,6 +35,7 @@ _SUM_SPECS = (
     MetricSpec("ls_overdue_penalty_component", "reward/penalty/ls_overdue/sum", "sum", True),
     MetricSpec("ls_dropped_penalty_component", "reward/penalty/ls_dropped/sum", "sum", True),
     MetricSpec("ls_backlog_penalty_component", "reward/penalty/ls_backlog/sum", "sum", True),
+    MetricSpec("ls_terminal_backlog_penalty_component", "reward/penalty/ls_terminal_backlog/sum", "sum"),
     MetricSpec("dc_thermal_penalty_component", "reward/penalty/dc_thermal/sum", "sum", True),
     MetricSpec("dc_constraint_penalty_component", "reward/penalty/dc_constraint/sum", "sum", True),
     MetricSpec("bat_terminal_soc_penalty_component", "reward/penalty/battery_terminal_soc/sum", "sum", True),
@@ -62,6 +63,7 @@ _SUM_SPECS = (
     MetricSpec("ls_enforced", "sla/enforced_steps", "sum"),
     MetricSpec("dc_water_usage", "water/liters", "sum"),
     MetricSpec("dc_constraint_violation", "thermal/crac_clamp_steps", "sum"),
+    MetricSpec("dc_cooling_capacity_exceeded", "thermal/cooling_capacity_exceeded_steps", "sum"),
 )
 _MEAN_SPECS = (
     MetricSpec("price_denorm_c_per_kwh", "tariff/price_c_per_kwh", "mean"),
@@ -86,6 +88,8 @@ _MAX_SPECS = (
     MetricSpec("ls_oldest_task_age", "sla/oldest_task_age_fraction/max", "max"),
     MetricSpec("ls_overdue_penalty", "sla/overdue_tasks_per_step/max", "max"),
     MetricSpec("dc_int_temperature", "thermal/internal_temperature_c/max", "max"),
+    MetricSpec("dc_max_rack_inlet_c", "thermal/rack_inlet_c/max", "max"),
+    MetricSpec("dc_unmet_cooling_kW", "thermal/unmet_cooling_kw/max", "max"),
 )
 _LAST_SPECS = (
     
@@ -410,8 +414,10 @@ _TRACE_PREFIXES = (
         "ls_task_age_histogram",
     )),
     ("thermal/", (
-        "dc_crac_setpoint", "dc_int_temperature", "dc_exterior_ambient_temp",
-        "dc_thermal_limit_c", "dc_constraint_violation",
+        "dc_crac_setpoint", "dc_int_temperature", "dc_max_rack_inlet_c",
+        "dc_exterior_ambient_temp", "dc_thermal_limit_c", "dc_constraint_violation",
+        "dc_chiller_available_cooling_kW", "dc_unmet_cooling_kW",
+        "dc_cooling_capacity_exceeded", "dc_steady_state_thermal_valid",
     )),
     ("power/", (
         "dc_ITE_total_power_kW", "dc_HVAC_total_power_kW", "dc_CT_total_power_kW",

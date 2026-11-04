@@ -79,6 +79,39 @@ def test_feasible_empty_state_has_only_shared_tariff_component():
                if key.endswith("penalty_component"))
 
 
+def test_inlet_calibration_bound_replaces_outlet_setpoint_penalty_when_enabled():
+    params = dict(_PARAMS, dc_int_temperature=36.0,
+                  dc_thermal_limit_c=21.6, dc_max_rack_inlet_c=26.0)
+    config = dict(_CONFIG, dc_max_rack_inlet_c=28.0)
+    rewards, components = reward_creator.team_tariff_targeted_safeguards(params, config)
+    assert components['dc_thermal_penalty_component'] == 0.0
+    assert rewards['agent_dc'] == -2.9
+    params['dc_max_rack_inlet_c'] = 29.0
+    rewards, components = reward_creator.team_tariff_targeted_safeguards(params, config)
+    assert components['dc_thermal_penalty_component'] == .75
+    assert rewards['agent_dc'] == -3.65
+    valid = EnvConfig({'reward': {'mode': 'team_tariff_targeted_safeguards',
+                                  'dc_max_rack_inlet_c': 28.0},
+                       'episode_start_policy': 'valid_midnight'})
+    assert valid['reward']['dc_max_rack_inlet_c'] == 28.0
+
+
+def test_positive_degradation_weight_charges_only_battery_reward():
+    params = dict(_PARAMS, bat_degradation_cost_c=100.0)
+    config = dict(_CONFIG, degradation_cost_weight=1.0)
+    rewards, components = reward_creator.team_tariff_targeted_safeguards(
+        params, config
+    )
+    assert components['bat_degradation_penalty_component'] == 1.0
+    assert rewards['agent_bat'] == -3.5
+    assert rewards['agent_ls'] == -4.35
+    assert rewards['agent_dc'] == -4.4
+    valid = EnvConfig({'reward': {'mode': 'team_tariff_targeted_safeguards',
+                                  'degradation_cost_weight': 1.0},
+                       'episode_start_policy': 'valid_midnight'})
+    assert valid['reward']['degradation_cost_weight'] == 1.0
+
+
 def test_zero_degradation_weight_ignores_reported_degradation_cost():
     low_cost = dict(_PARAMS, bat_degradation_cost_c=0.0)
     high_cost = dict(_PARAMS, bat_degradation_cost_c=1_000_000.0)
@@ -114,12 +147,6 @@ def test_experiment_one_config_rejects_invalid_reward_settings():
     invalid = (
         {"reward": {"mode": "unknown"}},
         {"reward": {"mode": "team_tariff_targeted_safeguards", "scale": -0.01}},
-        {
-            "reward": {
-                "mode": "team_tariff_targeted_safeguards",
-                "degradation_cost_weight": 0.1,
-            }
-        },
         {
             "agents": ["agent_bat", "agent_dc", "agent_ls"],
             "episode_start_policy": "valid_midnight",

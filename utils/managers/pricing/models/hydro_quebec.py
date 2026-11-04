@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from typing import Mapping
 
 import numpy as np
@@ -15,6 +16,7 @@ from ..contracts import (
 )
 
 
+_MONTH_START_DAYS = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
 _ALLOWED_KEYS = {"schema_version", "model", "metadata", "selection", "rates"}
 _RATE_NAMES = ("rate_m", "rate_l", "new_dc_rate")
 _ALLOWED_OPTIONS = {"tariff", "demand_floor_kw"}
@@ -276,6 +278,10 @@ class HydroQuebecPricingModel:
         capacity_kw = context.datacenter_capacity_mw * 1000.0
         return "rate_l" if capacity_kw >= self.rate_l_threshold_kw else "rate_m"
 
+    def _month_key(self, day_of_year: int) -> tuple[int, int]:
+        year, day = divmod(day_of_year, 365)
+        return year, bisect_right(_MONTH_START_DAYS, day) - 1
+
     def _winter_day(self, day_of_year: int) -> bool:
         day = day_of_year % 365
         if self.winter_start_day <= self.winter_end_day:
@@ -403,21 +409,20 @@ class HydroQuebecPricingModel:
         carry = {} if carry_state is None else carry_state
         if not isinstance(carry, Mapping):
             raise ValueError("carry_state must be a mapping")
-        unknown = set(carry) - {"winter_peak_kw", "ending_peak_kw"}
+        # Only the winter peak may cross an episode boundary, and only between
+        # consecutive months. A month's peak is billed inside that month.
+        unknown = set(carry) - {"winter_peak_kw"}
         if unknown:
             key = min(unknown, key=repr)
             raise _field_error(f"carry_state.{key}", "is unknown")
         winter_peak = _finite_nonnegative(carry.get("winter_peak_kw", 0.0),
                                           "carry_state.winter_peak_kw")
-        ending_peak = _finite_nonnegative(carry.get("ending_peak_kw", 0.0),
-                                          "carry_state.ending_peak_kw")
         rate = self.rates[tariff]
         ratchet = rate.get("winter_ratchet_fraction")
         ratcheted_floor = (ratchet * winter_peak) if ratchet is not None else 0.0
         minimum_billing_demand = rate.get("minimum_billing_demand_kw", 0.0)
         state.billing_period_energy_kwh = 0.0
         state.running_peak_kw = max(
-            ending_peak,
             demand_floor,
             ratcheted_floor,
             minimum_billing_demand,
@@ -436,6 +441,8 @@ class HydroQuebecPricingModel:
             "pending_day_is_winter": False,
             "pending_day_started_at_midnight": False,
             "month_optimization_charge_c": 0.0,
+            "month_key": list(self._month_key(clock.day_of_year)),
+            "demand_floor_charged": False,
         })
 
     def step(
@@ -451,6 +458,24 @@ class HydroQuebecPricingModel:
         _validate_reading(reading)
         if "tariff" not in state.model_state:
             raise ValueError("model must be reset before step")
+        month_key = list(self._month_key(clock.day_of_year))
+        additional = 0.0
+        if state.model_state["month_key"] != month_key:
+            additional = self._settle_pending_day(state)
+            state.billing_period_energy_kwh = 0.0
+            ratchet = self._rate(state).get("winter_ratchet_fraction")
+            state.model_state["ratcheted_floor_kw"] = (
+                ratchet * state.model_state["winter_peak_kw"] if ratchet is not None else 0.0
+            )
+            state.running_peak_kw = max(
+                state.model_state["demand_floor_kw"],
+                state.model_state["ratcheted_floor_kw"],
+                self._rate(state).get("minimum_billing_demand_kw", 0.0),
+            )
+            state.model_state["ending_peak_kw"] = state.running_peak_kw
+            state.model_state["month_optimization_charge_c"] = 0.0
+            state.model_state["month_key"] = month_key
+            state.model_state["demand_floor_charged"] = False
         is_winter = self._winter_day(clock.day_of_year)
         if is_winter:
             state.model_state["winter_peak_kw"] = max(
@@ -462,8 +487,11 @@ class HydroQuebecPricingModel:
         demand_increment = self._rate(state)["demand_charge_c_per_kw_month"] * (
             state.running_peak_kw - previous_peak
         )
+        if not state.model_state["demand_floor_charged"]:
+            demand_increment += self._rate(state)["demand_charge_c_per_kw_month"] * previous_peak
+            state.model_state["demand_floor_charged"] = True
         energy_cost = self._energy_cost(state, reading.energy_kwh)
-        additional = self._record_daily_peak(state, clock, reading, context)
+        additional += self._record_daily_peak(state, clock, reading, context)
         return PricingCharges(energy_cost, demand_increment, additional)
 
     def observe(
@@ -500,10 +528,7 @@ class HydroQuebecPricingModel:
     def export_carry_state(self, state: PricingState) -> Mapping[str, object]:
         if "tariff" not in state.model_state:
             raise ValueError("model must be reset before exporting carry state")
-        return {
-            "winter_peak_kw": float(state.model_state["winter_peak_kw"]),
-            "ending_peak_kw": float(state.model_state["ending_peak_kw"]),
-        }
+        return {"winter_peak_kw": float(state.model_state["winter_peak_kw"])}
 
 
 __all__ = ["HydroQuebecPricingModel", "validate_options"]

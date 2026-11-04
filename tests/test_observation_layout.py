@@ -57,6 +57,13 @@ def _get_env():
     return _env
 
 
+def test_flat_forecast_relative_position_stays_bounded():
+    env = _get_env()
+    values = env.extract_ci_features(np.full(16, 0.5), 0.4)
+    assert np.isfinite(values).all()
+    assert -2.0 <= values[2] <= 2.0
+
+
 def test_declared_box_widths_match_built_vectors():
     """The hardcoded Box shapes must equal what the builders actually emit."""
     env = _get_env()
@@ -71,7 +78,7 @@ def test_widths_are_the_expected_values():
     env = _get_env()
     obs = env.reset()
     assert obs["agent_ls"].shape[0] == 40, obs["agent_ls"].shape
-    assert obs["agent_dc"].shape[0] == 28, obs["agent_dc"].shape
+    assert obs["agent_dc"].shape[0] == 29, obs["agent_dc"].shape
     assert obs["agent_bat"].shape[0] == 29, obs["agent_bat"].shape
 
 
@@ -99,6 +106,18 @@ def test_season_features_are_present_and_in_range():
         o = env.reset()
         seen.add(round(float(o["agent_bat"][2]), 4))
     assert len(seen) > 1, "cos_day never changes across resets"
+
+
+def test_dc_observes_current_setpoint_after_action_and_reset():
+    env = _get_env()
+    obs = env.reset(seed=102, options={"init_day": 14, "init_hour": 0})
+    idx = SustainDC.DC_IDX["setpoint_ratio"]
+    assert np.isclose(obs["agent_dc"][idx], env.dc_env.raw_curr_stpt / env.dc_env.max_temp)
+    next_obs, _, _, _, _ = env.step({"agent_ls": 1, "agent_dc": 0, "agent_bat": 2})
+    assert np.isclose(next_obs["agent_dc"][idx], env.dc_env.raw_curr_stpt / env.dc_env.max_temp)
+    assert next_obs["agent_dc"][idx] < obs["agent_dc"][idx]
+    reset_obs = env.reset(seed=102, options={"init_day": 14, "init_hour": 0})
+    assert np.isclose(reset_obs["agent_dc"][idx], obs["agent_dc"][idx])
 
 
 def test_layout_indices_point_at_the_features_they_claim():
@@ -136,10 +155,10 @@ def test_pv_block_precedes_and_does_not_displace_trailing_price_block():
 def test_pv_observation_widths_and_shared_critic_width_are_pinned():
     env = _get_env()
     obs = env.reset()
-    assert [obs[a].shape[0] for a in env.agents] == [40, 28, 29]
+    assert [obs[a].shape[0] for a in env.agents] == [40, 29, 29]
     # The non-overlapping critic also receives the battery's measured
     # previous load and uncapped running peak.
-    assert obs["agent_ls"].shape[0] + 2 + 3 == 45
+    assert obs["agent_ls"].shape[0] + 3 + 3 == 46
 
 
 def test_battery_previous_load_and_uncapped_peak_are_causal():
@@ -186,6 +205,27 @@ def test_price_block_is_the_last_three_slots_of_every_agent():
         assert np.allclose(obs[agent][-3:], expected, atol=1e-6), agent
 
 
+def test_shared_critic_observes_dc_setpoint_changes():
+    from harl.envs.sustaindc.harlsustaindc_env import HARLSustainDCEnv
+
+    env = HARLSustainDCEnv(dict(
+        _ENV_CONFIG, state_type="FP", partial_obs=True,
+        nonoverlapping_shared_obs_space=True,
+    ))
+    try:
+        actor_obs, shared_obs, _ = env.reset(
+            seed=102, options={"init_day": 14, "init_hour": 0}
+        )
+        dc_index = SustainDC.DC_IDX["setpoint_ratio"]
+        shared_index = 42
+        assert np.isclose(shared_obs[1][shared_index], actor_obs[1][dc_index])
+        actor_obs, shared_obs, _, _, _, _ = env.step(np.array([1, 0, 2]))
+        assert np.isclose(shared_obs[1][shared_index], actor_obs[1][dc_index])
+        assert shared_obs[1][shared_index] < 18.0 / env.env.unwrapped.env.dc_env.max_temp
+    finally:
+        env.close()
+
+
 def test_fp_shared_critic_space_adds_agent_identity_features():
     from harl.envs.sustaindc.sustaindc_ptzoo import SustainDCPettingZooEnv
 
@@ -193,7 +233,7 @@ def test_fp_shared_critic_space_adds_agent_identity_features():
         dict(_ENV_CONFIG, state_type="FP", partial_obs=True,
              nonoverlapping_shared_obs_space=True)
     )
-    assert all(space.shape == (48,) for space in env.share_observation_space.values())
+    assert all(space.shape == (49,) for space in env.share_observation_space.values())
 
 
 def test_padded_battery_peak_bounds_do_not_leak_into_other_features():
@@ -209,9 +249,12 @@ def test_padded_battery_peak_bounds_do_not_leak_into_other_features():
         actor_obs, shared_obs, _ = env.reset(seed=102, options={"init_day": 14, "init_hour": 0})
         actor_obs, shared_obs, _, _, _, _ = env.step(np.array([1, 1, 0]))
         peak_index = SustainDC.BAT_IDX["billing_peak_ratio"]
-        assert actor_obs[2][peak_index] > 2.0
+        raw = env.env.unwrapped.env
+        expected_ratio = raw.price_m.state.running_peak_kw / (raw.datacenter_capacity_mw * 1000.0)
+        assert expected_ratio > 1.0
+        assert np.isclose(actor_obs[2][peak_index], expected_ratio)
         assert actor_obs[2][peak_index] <= env.observation_space[2].high[peak_index]
-        assert shared_obs[2][44] <= env.share_observation_space[2].high[44]
+        assert shared_obs[2][45] <= env.share_observation_space[2].high[45]
         assert np.isfinite(env.observation_space[2].high).all()
         assert np.all(env.observation_space[2].high[29:] <= 10.0)
     finally:

@@ -395,6 +395,15 @@ def test_aggregate_snapshots_reports_mean_standard_deviation_minimum_and_maximum
 
 
 
+def test_cooling_capacity_invalid_steps_are_counted_in_episode_summary():
+    acc = FacilityMetricAccumulator("episode")
+    acc.add({"dc_cooling_capacity_exceeded": 0.0, "dc_unmet_cooling_kW": 0.0})
+    acc.add({"dc_cooling_capacity_exceeded": 1.0, "dc_unmet_cooling_kW": 12.5})
+    result = acc.snapshot()
+    assert result["episode/thermal/cooling_capacity_exceeded_steps"] == 1.0
+    assert result["episode/thermal/unmet_cooling_kw/max"] == 12.5
+
+
 def test_units_pairs_and_bounded_memory():
     acc = FacilityMetricAccumulator("test")
     acc.add({"bat_CO2_footprint": 1500, "bat_grid_import_kwh": 2,
