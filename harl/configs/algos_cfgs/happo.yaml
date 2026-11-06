@@ -47,6 +47,9 @@ eval:
   # Rank eligible policies on four deterministic, independent full months.
   # This replaces reward-ranked vector evaluation for checkpoint selection;
   # these cases were previously used in scenario analysis, not pristine holdouts.
+  # Ending below the starting battery SOC is not a gate (null = no cap): the
+  # energy to refill it is added to the bill before ranking. A number (kWh,
+  # summed over the four months) would also reject candidates above it.
   fixed_month_validation:
     enabled: True
     seed: 102
@@ -54,7 +57,7 @@ eval:
     require_zero_overdue_steps: True
     require_zero_thermal_clamp_steps: True
     require_zero_capacity_exceeded_steps: True
-    max_terminal_soc_restore_grid_kwh: 0.0
+    max_terminal_soc_restore_grid_kwh: null
     retain_top_k: 5
 
 render:

@@ -1,4 +1,8 @@
-"""Matched fixed-window checkpoint evaluation; never writes into a training run."""
+"""Matched fixed-window checkpoint evaluation; never writes into a training run.
+
+Defaults to the final window set (March, June, September, December), which lies
+outside fixed-month checkpoint selection and discharge-floor calibration.
+"""
 from __future__ import annotations
 
 import argparse
@@ -23,7 +27,28 @@ from harl.envs.sustaindc.metrics import FacilityMetricAccumulator, build_trace_r
 from utils.managers.pricing.models.hydro_quebec import _MONTH_START_DAYS
 
 AGENTS = ('agent_ls', 'agent_dc', 'agent_bat')
-WINDOWS = {'winter': 0, 'spring': 90, 'summer': 181, 'autumn': 273}
+WINDOW_SETS = {
+    # The fixed-month checkpoint-selection months (fixed_month_validation.DEFAULT_CASES).
+    'validation': {'winter': 0, 'spring': 90, 'summer': 181, 'autumn': 273},
+    # Final evaluation months: outside checkpoint selection and floor calibration.
+    'final': {'march': 59, 'june': 151, 'september': 243, 'december': 334},
+}
+DEFAULT_WINDOW_SET = 'final'
+WINDOW_SET_NOTES = {
+    'validation': (
+        'Validation months (January, April, July, October) are the fixed-month '
+        'checkpoint-selection set and were used to check the 10 MW discharge floor, '
+        'so results on them are not held-out evidence.'
+    ),
+    'final': (
+        'Final months (March, June, September, December) are outside the fixed-month '
+        'checkpoint-selection set and were not used to choose or check the 10 MW '
+        'discharge floor. Training is not restricted to other months, so they are held '
+        'out from selection and calibration, not from training.'
+    ),
+}
+# Saved analysis scripts read WINDOWS as the validation months.
+WINDOWS = WINDOW_SETS['validation']
 
 
 def month_steps(start_day):
@@ -47,6 +72,19 @@ def unique_requested(values, available, option_name):
     if duplicates:
         raise ValueError(f"duplicate {option_name} value: {duplicates[0]}")
     return selected
+
+
+def select_windows(names, window_set):
+    """Return requested windows of one window set, in request order, with start days."""
+    available = WINDOW_SETS[window_set]
+    selected = unique_requested(names, available, '--window')
+    outside = [name for name in selected if name not in available]
+    if outside:
+        raise ValueError(
+            f"--window {outside[0]} is not in window set {window_set!r} "
+            f"(choose from {', '.join(available)})"
+        )
+    return {name: available[name] for name in selected}
 
 
 def paired_difference(candidate, baseline):
@@ -299,18 +337,21 @@ def run_episode(config, actors, mode, day, seed, max_steps=None):
 
 
 def evaluate_scenarios(config, run, windows, modes, seed, smoke_steps):
-    """Run selected controllers on fixed scenarios using one loaded checkpoint."""
+    """Run selected controllers on fixed scenarios using one loaded checkpoint.
+
+    ``windows`` maps each window name to its month-start day.
+    """
     checkpoint_env = HARLSustainDCEnv(config['env_args'])
     try:
         actors, hashes = load_checkpoint(run, checkpoint_env)
     finally:
         checkpoint_env.close()
     summaries, traces = [], {}
-    for window in windows:
+    for window, day in windows.items():
         reference = None
         for mode in modes:
             rows, summary, exogenous = run_episode(
-                config, actors, mode, WINDOWS[window], seed, smoke_steps
+                config, actors, mode, day, seed, smoke_steps
             )
             if reference is None:
                 reference = exogenous
@@ -336,14 +377,18 @@ def main():
     p.add_argument('run', type=Path, help='saved run containing config.json and models/')
     p.add_argument('--output-root', type=Path, default=ROOT / 'results' / 'matched-evaluations')
     p.add_argument('--seed', type=int, default=102)
-    p.add_argument('--window', choices=WINDOWS, action='append')
+    p.add_argument('--window-set', choices=WINDOW_SETS, default=DEFAULT_WINDOW_SET,
+                   help='final (default): months outside checkpoint selection and floor '
+                        'calibration; validation: the checkpoint-selection months')
+    p.add_argument('--window', choices=[name for names in WINDOW_SETS.values() for name in names],
+                   action='append', help='restrict to these months of the chosen --window-set')
     p.add_argument('--mode', choices=MODES, action='append')
     p.add_argument('--smoke-steps', type=int, help='short diagnostic only; incomplete results are not evaluations')
     args = p.parse_args()
     if args.smoke_steps is not None and not 1 <= args.smoke_steps < 31 * 96:
         p.error('smoke steps must be in 1..2975')
     try:
-        windows = unique_requested(args.window, WINDOWS, '--window')
+        windows = select_windows(args.window, args.window_set)
         modes = unique_requested(args.mode, MODES, '--mode')
     except ValueError as error:
         p.error(str(error))
@@ -370,7 +415,7 @@ def main():
         except importlib.metadata.PackageNotFoundError: versions[package] = None
     def git(*params):
         return subprocess.check_output(['git', '-C', str(ROOT), *params], text=True).strip()
-    provenance = {'checkpoint': str(run), 'hashes_sha256': hashes, 'checkout_commit': git('rev-parse', 'HEAD'), 'checkout_status': git('status', '--porcelain'), 'python': platform.python_version(), 'dependencies': versions, 'config': config, 'scenario_seed': args.seed, 'windows': WINDOWS, 'limitations': ['Fixed representative windows are not statistical samples.', 'No-op is not a rule-based controller.', 'Checkpoint training code revision is not established by this evaluation.', 'Actor-only inference; critic weights are validated but not used, and the value normalizer is not restored.', 'Grid-minus-gross-load includes PV and is not a battery-only counterfactual.', 'Smoke results are incomplete when smoke_steps is shorter than the calendar month.']}
+    provenance = {'checkpoint': str(run), 'hashes_sha256': hashes, 'checkout_commit': git('rev-parse', 'HEAD'), 'checkout_status': git('status', '--porcelain'), 'python': platform.python_version(), 'dependencies': versions, 'config': config, 'scenario_seed': args.seed, 'window_set': args.window_set, 'windows': windows, 'limitations': [WINDOW_SET_NOTES[args.window_set], 'Fixed representative windows are not statistical samples.', 'No-op is not a rule-based controller.', 'Checkpoint training code revision is not established by this evaluation.', 'Actor-only inference; critic weights are validated but not used, and the value normalizer is not restored.', 'Grid-minus-gross-load includes PV and is not a battery-only counterfactual.', 'Smoke results are incomplete when smoke_steps is shorter than the calendar month.']}
     (out / 'provenance.json').write_text(json.dumps(provenance, indent=2, allow_nan=False))
     (out / 'summaries.json').write_text(json.dumps(summaries, indent=2, allow_nan=False))
     (out / 'paired-differences.json').write_text(json.dumps(pairs, indent=2, allow_nan=False))

@@ -31,6 +31,7 @@ from harl.envs.sustaindc.sequential import sequential_battery_index
 from harl.envs.sustaindc.fixed_month_validation import (
     ValidationResult,
     eligible as validation_eligible,
+    ranking_key as validation_ranking_key,
     select_best as select_validation_best,
     validate_fixed_months,
 )
@@ -1076,7 +1077,7 @@ class OnPolicyBaseRunner:
                    for item in candidates]
         ranked = sorted(
             (result for result in results if validation_eligible(result, self.fixed_validation)),
-            key=lambda result: (result.aggregate["episode/tariff/cost/total_c"], result.aggregate["grid_peak_kw"], result.event),
+            key=validation_ranking_key,
         )
         retain_top_k = int(self.fixed_validation.get("retain_top_k", 5))
         if retain_top_k <= 0:
@@ -1093,7 +1094,8 @@ class OnPolicyBaseRunner:
             if candidate.is_dir() and int(candidate.name.removeprefix("event-")) not in preserved_events:
                 shutil.rmtree(candidate)
         manifest = {
-            "ranking": "eligible candidates: aggregate tariff total, then maximum monthly grid peak, then earlier event",
+            "ranking": "eligible candidates: restoration-adjusted bill (aggregate tariff total "
+                       "plus battery refill energy cost), then maximum monthly grid peak, then earlier event",
             "candidates": retained,
         }
         (validation_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False))

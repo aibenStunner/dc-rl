@@ -3,11 +3,14 @@
 This validator intentionally uses independent calendar months. Its aggregate is
 not a contiguous annual utility bill and it does not itself compare a policy
 against no-op or cold-noop baselines.
+
+Eligible candidates are ranked by a restoration-adjusted bill: the modeled
+tariff bill plus the energy cost of refilling the battery to its starting state
+of charge. The refill is a selection adjustment, not a tariff charge.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -66,20 +69,35 @@ def eligible(result: ValidationResult, rules: Mapping[str, object]) -> bool:
     for option, metric in zero_gates:
         if rules.get(option, False) and metrics.get(metric, 0.0) > 0.0:
             return False
-    maximum = rules.get("max_terminal_soc_restore_grid_kwh", math.inf)
+    maximum = rules.get("max_terminal_soc_restore_grid_kwh")
+    if maximum is None:  # absent or null: no cap; ranking charges the refill instead
+        return True
     return float(metrics.get("episode/terminal/soc_restore_grid_kwh", 0.0)) <= float(maximum)
 
 
+def restoration_adjusted_bill_c(aggregate: Mapping[str, float]) -> float:
+    """Return the modeled bill plus the cost of refilling the battery.
+
+    The refill is valued as the environment's terminal-SOC settlement values it:
+    grid energy needed to restore the starting SOC, at the energy price of the
+    month's final interval. Any demand charge the refill might cause is excluded.
+    """
+    return (float(aggregate["episode/tariff/cost/total_c"])
+            + float(aggregate["episode/terminal/soc_restore_cost_c"]))
+
+
+def ranking_key(result: ValidationResult) -> tuple[float, float, int]:
+    """Order candidates by restoration-adjusted bill, then peak, then earlier event."""
+    return (restoration_adjusted_bill_c(result.aggregate),
+            float(result.aggregate["grid_peak_kw"]), result.event)
+
+
 def select_best(results: Iterable[ValidationResult], rules: Mapping[str, object]) -> ValidationResult | None:
-    """Choose the eligible candidate by bill, peak, then earlier event."""
+    """Choose the eligible candidate with the lowest ``ranking_key``."""
     candidates = [result for result in results if eligible(result, rules)]
     if not candidates:
         return None
-    return min(candidates, key=lambda result: (
-        result.aggregate["episode/tariff/cost/total_c"],
-        result.aggregate["grid_peak_kw"],
-        result.event,
-    ))
+    return min(candidates, key=ranking_key)
 
 
 def validate_fixed_months(
@@ -143,7 +161,9 @@ def _validate_case(*, env_args, actors, recurrent_n, rnn_hidden_size, seed, even
             raise RuntimeError(f"validation case {case.name} has {len(rows)} steps; expected {expected_steps}")
         summary = metrics.snapshot()
         summary["grid_peak_kw"] = max(float(row["battery/bat_grid_import_kwh"]) * 4.0 for row in rows)
-        summary["episode/terminal/soc_restore_grid_kwh"] = float(rows[-1]["battery/bat_terminal_soc_restore_grid_kwh"])
+        restore_kwh = float(rows[-1]["battery/bat_terminal_soc_restore_grid_kwh"])
+        summary["episode/terminal/soc_restore_grid_kwh"] = restore_kwh
+        summary["episode/terminal/soc_restore_cost_c"] = _refill_cost_c(rows[-1], restore_kwh, case.name)
         summary["episode/service/queue_overflow_forced_steps"] = summary.get("episode/workload/queue_overflow_forced_tasks", 0.0)
         summary["episode/service/overdue_steps"] = summary.get("episode/sla/overdue_task_steps", 0.0)
         summary["episode/thermal/clamp_steps"] = summary.get("episode/thermal/crac_clamp_steps", 0.0)
@@ -156,10 +176,22 @@ def _validate_case(*, env_args, actors, recurrent_n, rnn_hidden_size, seed, even
         env.close()
 
 
+def _refill_cost_c(final_row, restore_kwh, case_name):
+    if restore_kwh == 0.0:
+        return 0.0
+    price = final_row.get("battery/bat_terminal_soc_reference_price_c_per_kwh")
+    if price is None:
+        raise RuntimeError(
+            f"validation case {case_name} needs a battery refill but reports no reference price"
+        )
+    return restore_kwh * float(price)
+
+
 def _aggregate_cases(cases: Sequence[dict[str, object]]) -> dict[str, float]:
     summaries = [case["summary"] for case in cases]
     bill_key = "episode/tariff/cost/total_c"
     aggregate = {bill_key: sum(float(summary.get(bill_key, 0.0)) for summary in summaries), "grid_peak_kw": max(float(summary["grid_peak_kw"]) for summary in summaries)}
-    for key in ("episode/service/queue_overflow_forced_steps", "episode/service/overdue_steps", "episode/thermal/clamp_steps", "episode/thermal/capacity_exceeded_steps", "episode/terminal/soc_restore_grid_kwh"):
+    for key in ("episode/service/queue_overflow_forced_steps", "episode/service/overdue_steps", "episode/thermal/clamp_steps", "episode/thermal/capacity_exceeded_steps", "episode/terminal/soc_restore_grid_kwh", "episode/terminal/soc_restore_cost_c"):
         aggregate[key] = sum(float(summary.get(key, 0.0)) for summary in summaries)
+    aggregate["restoration_adjusted_bill_c"] = restoration_adjusted_bill_c(aggregate)
     return aggregate

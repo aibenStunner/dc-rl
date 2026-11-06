@@ -1,4 +1,5 @@
 """Tests for standalone matched evaluator controller and checkpoint safeguards."""
+import io
 import json
 import sys
 import tempfile
@@ -26,10 +27,89 @@ class Actor:
 
 
 class MatchedTests(unittest.TestCase):
-    def test_scenario_manifest(self):
-        self.assertEqual(list(evaluator.WINDOWS.values()), [0, 90, 181, 273])
-        self.assertEqual([evaluator.month_steps(day) for day in evaluator.WINDOWS.values()],
+    def test_final_window_set_is_the_default(self):
+        self.assertEqual(evaluator.DEFAULT_WINDOW_SET, 'final')
+        final = evaluator.WINDOW_SETS['final']
+        self.assertEqual(list(final.items()),
+                         [('march', 59), ('june', 151), ('september', 243), ('december', 334)])
+        self.assertEqual([evaluator.month_steps(day) for day in final.values()],
+                         [31 * 96, 30 * 96, 30 * 96, 31 * 96])
+
+    def test_validation_window_set_is_the_checkpoint_selection_months(self):
+        from harl.envs.sustaindc.fixed_month_validation import DEFAULT_CASES
+
+        validation = evaluator.WINDOW_SETS['validation']
+        self.assertEqual(list(validation.items()),
+                         [(case.name, case.init_day) for case in DEFAULT_CASES])
+        self.assertEqual([evaluator.month_steps(day) for day in validation.values()],
                          [31 * 96, 30 * 96, 31 * 96, 31 * 96])
+        # Saved analysis scripts read WINDOWS as the January/April/July/October set.
+        self.assertIs(evaluator.WINDOWS, validation)
+
+    def test_final_months_were_not_used_for_selection_or_floor_calibration(self):
+        from harl.envs.sustaindc.fixed_month_validation import DEFAULT_CASES
+
+        final_days = set(evaluator.WINDOW_SETS['final'].values())
+        checkpoint_selection_days = {case.init_day for case in DEFAULT_CASES}
+        # The 10 MW discharge floor was chosen on February/May/August/November.
+        floor_selection_days = {31, 120, 212, 304}
+        self.assertEqual(final_days & checkpoint_selection_days, set())
+        self.assertEqual(final_days & floor_selection_days, set())
+
+    def test_window_selection_stays_within_one_window_set(self):
+        self.assertEqual(list(evaluator.select_windows(None, 'final').items()),
+                         list(evaluator.WINDOW_SETS['final'].items()))
+        self.assertEqual(list(evaluator.select_windows(['september', 'march'], 'final').items()),
+                         [('september', 243), ('march', 59)])
+        self.assertEqual(evaluator.select_windows(['spring'], 'validation'), {'spring': 90})
+        with self.assertRaisesRegex(ValueError, "--window spring is not in window set 'final'"):
+            evaluator.select_windows(['spring'], 'final')
+        with self.assertRaisesRegex(ValueError, 'duplicate --window value: june'):
+            evaluator.select_windows(['june', 'june'], 'final')
+
+    def test_each_window_set_discloses_what_it_is_held_out_from(self):
+        self.assertEqual(set(evaluator.WINDOW_SET_NOTES), set(evaluator.WINDOW_SETS))
+        self.assertIn('not from training', evaluator.WINDOW_SET_NOTES['final'])
+        self.assertIn('not held-out', evaluator.WINDOW_SET_NOTES['validation'])
+
+    def _saved_run(self, root):
+        run = root / 'run'
+        run.mkdir()
+        (run / 'config.json').write_text(json.dumps({'env_args': {
+            'agents': list(evaluator.AGENTS), 'datacenter_capacity_mw': 10,
+            'days_per_episode': 30, 'pricing': {'model': 'hydro_quebec'},
+        }}))
+        return run
+
+    def test_cli_defaults_to_final_months_and_records_the_window_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            argv = ['evaluate_matched.py', str(self._saved_run(root)),
+                    '--output-root', str(root / 'out'), '--mode', 'noop']
+            with patch.object(sys, 'argv', argv), \
+                 patch.object(evaluator, 'evaluate_scenarios', return_value=([], {}, {})) as evaluate, \
+                 patch('builtins.print'):
+                evaluator.main()
+            self.assertEqual(list(evaluate.call_args.args[2].items()),
+                             list(evaluator.WINDOW_SETS['final'].items()))
+            (out,) = (root / 'out').iterdir()
+            provenance = json.loads((out / 'provenance.json').read_text())
+        self.assertEqual(provenance['window_set'], 'final')
+        self.assertEqual(provenance['windows'], evaluator.WINDOW_SETS['final'])
+        self.assertIn(evaluator.WINDOW_SET_NOTES['final'], provenance['limitations'])
+
+    def test_cli_rejects_a_window_outside_the_chosen_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ['evaluate_matched.py', str(Path(directory) / 'run'),
+                    '--output-root', str(Path(directory) / 'out'), '--window', 'spring']
+            with patch.object(sys, 'argv', argv), \
+                 patch.object(evaluator, 'evaluate_scenarios') as evaluate, \
+                 patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                with self.assertRaises(SystemExit):
+                    evaluator.main()
+            self.assertFalse((Path(directory) / 'out').exists())
+        evaluate.assert_not_called()
+        self.assertIn("not in window set 'final'", stderr.getvalue())
 
     def test_run_episode_handles_a_complete_28_day_calendar_month(self):
         from tests.test_observation_layout import _ENV_CONFIG
@@ -214,14 +294,16 @@ class MatchedTests(unittest.TestCase):
         rows = [{'marker': 1}]
         with patch.object(evaluator, 'HARLSustainDCEnv', return_value=fake_env), \
              patch.object(evaluator, 'load_checkpoint', return_value=(['actors'], {'a': 'hash'})) as load, \
-             patch.object(evaluator, 'run_episode', return_value=(rows, {'complete': True}, np.array([[1.0]]))):
+             patch.object(evaluator, 'run_episode', return_value=(rows, {'complete': True}, np.array([[1.0]]))) as run:
             summaries, hashes, traces = evaluator.evaluate_scenarios(
-                config, Path('/checkpoint'), ['winter'], ['checkpoint', 'noop'], 102, 2880
+                config, Path('/checkpoint'), {'june': 151}, ['checkpoint', 'noop'], 102, 2880
             )
         self.assertEqual(load.call_count, 1)
+        self.assertEqual([call.args[2:5] for call in run.call_args_list],
+                         [('checkpoint', 151, 102), ('noop', 151, 102)])
         self.assertEqual(hashes, {'a': 'hash'})
         self.assertEqual(len(summaries), 2)
-        self.assertEqual(set(traces), {('winter', 'checkpoint'), ('winter', 'noop')})
+        self.assertEqual(set(traces), {('june', 'checkpoint'), ('june', 'noop')})
         fake_env.close.assert_called_once()
 
 
