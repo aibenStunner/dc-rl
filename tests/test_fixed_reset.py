@@ -138,6 +138,8 @@ def test_harl_adapter_maps_truncation_to_done_without_bad_transition():
 
     _, _, _, dones, infos, _ = wrapper.step(np.array([[1], [1], [2]]))
     assert dones == [True, True, True]
+    assert all(info["_harl_terminated"] is False for info in infos)
+    assert all(info["_harl_truncated"] is True for info in infos)
     assert all("bad_transition" not in info for info in infos)
 
 

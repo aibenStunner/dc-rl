@@ -54,7 +54,8 @@ def make_bat_fwd_env(month,
                     round_trip_efficiency : float = 0.90,
                     degradation_cost_c_per_kwh : float = 5.78,
                     initial_soc: float = 0.0,
-                    rated_power_mw: float = None
+                    rated_power_mw: float = None,
+                    discharge_mode: str = 'fixed_rate'
                     ):
     """Method to build the Battery environment.
 
@@ -63,6 +64,9 @@ def make_bat_fwd_env(month,
         max_bat_cap_Mwh (float, optional): Max battery capacity. Defaults to 2.0.
         charging_rate (float, optional): Charging rate of the battery. Defaults to 0.5.
         reward_method (str, optional): Method used to calculate the rewards. Defaults to 'default_bat_reward'.
+        discharge_mode (str, optional): 'fixed_rate' discharges at the SOC rate curve;
+            'peak_limit' discharges only the net-import excess over the target set by
+            set_discharge_peak_target_kw. Defaults to 'fixed_rate'.
 
     Returns:
         battery_env_fwd: Batery environment.
@@ -78,7 +82,8 @@ def make_bat_fwd_env(month,
                  'round_trip_efficiency': round_trip_efficiency,
                  'degradation_cost_c_per_kwh': degradation_cost_c_per_kwh,
                  'initial_soc': initial_soc,
-                 'rated_power_mw': rated_power_mw}
+                 'rated_power_mw': rated_power_mw,
+                 'discharge_mode': discharge_mode}
     bat_env = battery_env_fwd(env_config)
     return bat_env
 

@@ -72,6 +72,14 @@ class SustainDCPettingZooEnv(ParallelEnv):
             initial_observations_with_info = self.env.reset(seed=seed, options=options)
         return initial_observations_with_info  # , []
 
+    def begin_step(self, actions):
+        """Run workload/cooling for this interval; return the battery decision observation.
+
+        Args:
+            actions (dict): Actions for every agent except agent_bat.
+        """
+        return self.env.begin_step(actions)
+
     def step(self, actions):
         """
         Take actions for all agents, process the environment's reaction, and return the next set of observations, rewards, etc.

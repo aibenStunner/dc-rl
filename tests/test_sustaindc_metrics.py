@@ -452,5 +452,23 @@ def test_interval_flush_once_and_final_partial_flush():
             if "train/interval/tariff/cost/total_c" in row]
     assert rows == [3, 3]
 
+
+def test_trace_row_retains_terminal_backlog_and_requested_dispatch():
+    info = {
+        "ls_terminal_backlog_tasks": 7.0,
+        "ls_terminal_backlog_penalty_component": 3.5,
+        "bat_requested_action": "discharge",
+        "bat_requested_power_mw": 0.4,
+        "bat_delivered_bus_power_mw": -0.1,
+    }
+    row = build_trace_row(info=info, actions=[1, 1, 1], run_metadata={},
+                          terminal=False, truncated=True)
+    assert row["reward/ls_terminal_backlog_penalty_component"] == 3.5
+    assert row["sla/ls_terminal_backlog_tasks"] == 7.0
+    assert row["battery/bat_requested_action"] == "discharge"
+    assert row["battery/bat_requested_power_mw"] == 0.4
+    assert row["battery/bat_delivered_bus_power_mw"] == -0.1
+
+
 if __name__ == "__main__":
     sys.exit(1 if run_module_tests(globals()) else 0)

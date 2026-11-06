@@ -384,6 +384,7 @@ _TRACE_PREFIXES = (
         "shared_tariff_cost_reward", "agent_ls_reward", "agent_dc_reward",
         "agent_bat_reward", "ls_overdue_penalty_component",
         "ls_dropped_penalty_component", "ls_backlog_penalty_component",
+        "ls_terminal_backlog_penalty_component",
         "dc_thermal_penalty_component", "dc_constraint_penalty_component",
         "bat_terminal_soc_penalty_component", "bat_degradation_penalty_component",
     )),
@@ -394,7 +395,8 @@ _TRACE_PREFIXES = (
         "billing_period_energy_kwh", "billing_progress_fraction", "selected_tariff",
     )),
     ("battery/", (
-        "bat_action", "bat_a_t", "bat_SOC", "bat_grid_import_kwh",
+        "bat_action", "bat_a_t", "bat_requested_action", "bat_requested_power_mw",
+        "bat_delivered_bus_power_mw", "bat_SOC", "bat_grid_import_kwh",
         "bat_dc_load_kwh", "bat_total_energy_without_battery_KWh",
         "bat_charge_bus_KWh", "bat_discharge_bus_KWh", "bat_charge_cell_KWh",
         "bat_discharge_cell_KWh", "bat_cell_throughput_KWh",
@@ -411,7 +413,7 @@ _TRACE_PREFIXES = (
     ("sla/", (
         "ls_tasks_in_queue", "ls_norm_tasks_in_queue", "ls_tasks_dropped",
         "ls_overdue_penalty", "ls_oldest_task_age", "ls_average_task_age",
-        "ls_task_age_histogram",
+        "ls_task_age_histogram", "ls_terminal_backlog_tasks",
     )),
     ("thermal/", (
         "dc_crac_setpoint", "dc_int_temperature", "dc_max_rack_inlet_c",

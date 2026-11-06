@@ -525,6 +525,60 @@ class HydroQuebecPricingModel:
             normalized_peak=float(normalized_peak),
         )
 
+    def charge_import_limit_kw(
+        self,
+        *,
+        context: PricingContext,
+        state: PricingState,
+        clock: PricingClock,
+    ) -> float:
+        """Grid import that battery charging may reach in the interval at `clock`.
+
+        Up to this level the interval adds no demand charge for the month and,
+        on winter Rate L, no daily optimization charge. It is the billing peak
+        the interval would see: the running peak, or the next month's opening
+        peak at a month change. Winter Rate L lowers it to the larger of
+        110 % of contract power and today's peak so far, unless the month's
+        settled optimization charge plus today's pending overrun already
+        reaches the monthly cap, after which extra overrun is free. A new
+        winter peak may still raise later months' ratchet; carry state is
+        outside this interval's bill and is ignored here.
+        """
+        _validate_context(context)
+        _validate_clock(clock)
+        if "tariff" not in state.model_state:
+            raise ValueError("model must be reset before charge_import_limit_kw")
+        model_state = state.model_state
+        rate = self._rate(state)
+        new_month = model_state["month_key"] != list(self._month_key(clock.day_of_year))
+        if new_month:
+            ratchet = rate.get("winter_ratchet_fraction")
+            ratcheted_floor = (ratchet * model_state["winter_peak_kw"]
+                               if ratchet is not None else 0.0)
+            billing_peak = max(model_state["demand_floor_kw"], ratcheted_floor,
+                               rate.get("minimum_billing_demand_kw", 0.0))
+        else:
+            billing_peak = state.running_peak_kw
+        if model_state["tariff"] != "rate_l" or not self._winter_day(clock.day_of_year):
+            return float(billing_peak)
+
+        contract_power_kw = model_state["contract_power_kw"]
+        threshold_kw = rate["optimization_overrun_fraction"] * contract_power_kw
+        day_peak_kw = 0.0
+        projected_c = 0.0
+        if not new_month:
+            projected_c = model_state["month_optimization_charge_c"]
+            if (model_state["pending_day_key"] is not None
+                    and model_state["pending_day_is_winter"]):
+                projected_c += (max(0.0, model_state["day_peak_kw"] - threshold_kw)
+                                * rate["optimization_charge_c_per_kw_day"])
+            if model_state["pending_day_key"] == clock.day_of_year % 365:
+                day_peak_kw = model_state["day_peak_kw"]
+        cap_c = rate["optimization_charge_cap_c_per_kw_month"] * contract_power_kw
+        if projected_c >= cap_c:
+            return float(billing_peak)
+        return float(min(billing_peak, max(day_peak_kw, threshold_kw)))
+
     def export_carry_state(self, state: PricingState) -> Mapping[str, object]:
         if "tariff" not in state.model_state:
             raise ValueError("model must be reset before exporting carry state")

@@ -215,6 +215,8 @@ def shareworker(remote, parent_remote, env_fn_wrapper):
             remote.send((fr))
         elif cmd == "get_num_agents":
             remote.send((env.n_agents))
+        elif cmd == "begin_step":
+            remote.send(env.begin_step(data))
         else:
             raise NotImplementedError
 
@@ -284,6 +286,12 @@ class ShareSubprocVecEnv(ShareVecEnv):
             remote.send(("reset_task", None))
         return np.stack([remote.recv() for remote in self.remotes])
 
+    def begin_step(self, actions):
+        """Forward each thread's pre-battery actions; stack the battery decision observations."""
+        for remote, action in zip(self.remotes, actions):
+            remote.send(("begin_step", action))
+        return np.stack([remote.recv() for remote in self.remotes])
+
     def close(self):
         if self.closed:
             return
@@ -317,6 +325,10 @@ class ShareDummyVecEnv(ShareVecEnv):
 
     def step_async(self, actions):
         self.actions = actions
+
+    def begin_step(self, actions):
+        """Forward each thread's pre-battery actions; stack the battery decision observations."""
+        return np.stack([env.begin_step(a) for (a, env) in zip(actions, self.envs)])
 
     def step_wait(self):
         results = [env.step(a) for (a, env) in zip(self.actions, self.envs)]

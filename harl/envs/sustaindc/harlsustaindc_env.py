@@ -4,6 +4,7 @@ import gymnasium
 from gymnasium import spaces
 import numpy as np
 import supersuit as ss
+from supersuit.utils.action_transforms import homogenize_ops
 
 from harl.envs.sustaindc.sustaindc_ptzoo import SustainDCPettingZooEnv
 from pettingzoo.utils.conversions import parallel_wrapper_fn
@@ -129,6 +130,24 @@ class HARLSustainDCEnv:
         avail_actions = self.get_avail_actions()
         return obs, s_obs, avail_actions
 
+    def begin_step(self, actions):
+        """Run workload/cooling for this interval; return the padded battery decision observation.
+
+        Args:
+            actions (array-like): Padded actions of every agent before the battery,
+                in agent order. The same actions must be passed again to step().
+        """
+        flat = np.asarray(actions).flatten()
+        movers = self.agents[:-1]
+        if len(flat) != len(movers):
+            raise ValueError(f'begin_step expects {len(movers)} actions, got {len(flat)}')
+        base = self.env.unwrapped
+        raw = base.begin_step({
+            agent: homogenize_ops.dehomogenize_actions(base.action_spaces[agent], flat[i])
+            for i, agent in enumerate(movers)
+        })
+        return homogenize_ops.homogenize_observations(self.observation_space[len(self.agents) - 1], raw)
+
     def step(self, actions):
         """
         Take a step in the environment.
@@ -146,6 +165,11 @@ class HARLSustainDCEnv:
         s_obs = self._create_shared_observation(obs)
         rewards = [[rew[agent]] for agent in self.agents]
         dones = {agent: term[agent] or trunc[agent] for agent in self.agents}
+        # HARL consumes merged done flags; direct evaluators need the original
+        # distinction to accept only normal horizon truncation.
+        for agent in self.agents:
+            info[agent]["_harl_terminated"] = bool(term[agent])
+            info[agent]["_harl_truncated"] = bool(trunc[agent])
 
         return (
             obs,

@@ -367,6 +367,48 @@ def test_successful_pending_settlement_refreshes_observation_at_current_clock():
     assert manager._clock is clock_before
 
 
+def test_decision_observation_rejects_observe_that_mutates_billing_state():
+    manager = _manager("hydro_quebec")
+    manager.reset(init_day=10, init_hour=0.0)
+    manager.step(metered_energy_kwh=100.0, day_of_year=10, hour=0.0)
+    manager.observe_decision_clock(day_of_year=10, hour=0.25)
+    before = (manager.state.billing_period_energy_kwh, manager.state.running_peak_kw,
+              manager.get_decision_price(), manager.get_decision_normalized_peak())
+    original = manager.model.observe
+
+    def mutating_observe(**kwargs):
+        kwargs["state"].running_peak_kw += 1.0
+        return original(**kwargs)
+
+    manager.model.observe = mutating_observe
+    try:
+        manager.observe_decision_clock(day_of_year=10, hour=0.5)
+    except ValueError as exc:
+        assert "must not mutate" in str(exc)
+    else:
+        raise AssertionError("observe() mutation of billing state was accepted")
+    assert (manager.state.billing_period_energy_kwh, manager.state.running_peak_kw,
+            manager.get_decision_price(), manager.get_decision_normalized_peak()) == before
+
+
+def test_pending_settlement_refreshes_decision_observation_at_decision_clock():
+    manager = _manager("hydro_quebec")
+    manager.reset(init_day=10, init_hour=0.0)
+    manager.step(metered_energy_kwh=100.0, day_of_year=10, hour=5.75)
+    manager.observe_decision_clock(day_of_year=10, hour=6.0)
+    clocks = []
+    original = manager.model.observe
+
+    def recording_observe(**kwargs):
+        clocks.append((kwargs["clock"].day_of_year, kwargs["clock"].hour))
+        return original(**kwargs)
+
+    manager.model.observe = recording_observe
+    manager.settle_pending_period()
+    assert (10, 5.75) in clocks
+    assert (10, 6.0) in clocks
+
+
 def test_invalid_export_carry_state_restores_state_in_place():
     manager = _manager(
         "tests.fixtures.manager_pricing_plugins:MutatingInvalidCarryExportPlugin"

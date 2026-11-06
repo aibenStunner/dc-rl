@@ -111,6 +111,22 @@ def test_cooling_meter_reaches_battery_when_battery_charges():
     assert common['bat_charge_bus_KWh'] >= common['bat_charge_cell_KWh'] >= 0
 
 
+def test_battery_info_distinguishes_requested_direction_from_delivered_flows():
+    battery = BatteryEnvFwd({
+        'n_fwd_steps': 8, 'max_dc_pw_MW': 2.0, 'max_bat_cap': 2.0,
+        'charging_rate': 0.5, 'dcload_max': 2.0, 'dcload_min': 0.0,
+        'round_trip_efficiency': 0.90, 'degradation_cost_c_per_kwh': 5.78,
+        'rated_power_mw': 1.0, 'initial_soc': 0.0,
+    })
+    battery.reset()
+    battery.set_dcload(0.0)
+    _, _, _, _, info = battery.step(1)
+    assert info['bat_requested_action'] == 'discharge'
+    assert info['bat_requested_power_mw'] > 0.0
+    assert info['bat_delivered_bus_power_mw'] == 0.0
+    assert info['bat_discharge_bus_KWh'] == 0.0
+
+
 def test_charge_stays_under_running_peak_without_wasting_available_pv():
     battery = BatteryEnvFwd({
         'n_fwd_steps': 8, 'max_dc_pw_MW': 2.0, 'max_bat_cap': 2.0,
@@ -186,6 +202,8 @@ def test_training_scenario_charging_cannot_create_new_demand_peak():
     env.reset(seed=102, options={'init_day': 0, 'init_hour': 0})
     for _ in range(8):
         previous_peak = env.price_m.state.running_peak_kw
+        if env.battery_config['observation_timing'] == 'current':
+            env.begin_step({'agent_ls': 1, 'agent_dc': 1})
         _, _, _, _, info = env.step({'agent_ls': 1, 'agent_dc': 1, 'agent_bat': 0})
         common = info['__common__']
         assert common['billing_running_peak_kw'] <= max(

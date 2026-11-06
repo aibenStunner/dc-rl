@@ -29,7 +29,10 @@ WINDOWS = {'winter': 0, 'spring': 90, 'summer': 181, 'autumn': 273}
 def month_steps(start_day):
     index = _MONTH_START_DAYS.index(start_day)
     return ((*_MONTH_START_DAYS[1:], 365)[index] - start_day) * 96
-MODES = ('checkpoint', 'noop', 'cold-noop', 'checkpoint-battery-idle')
+MODES = (
+    'checkpoint', 'noop', 'cold-noop', 'checkpoint-battery-idle',
+    'noop-trailing-peak-battery', 'trailing-peak-workload-battery',
+)
 ROOT = Path(__file__).resolve().parent
 
 
@@ -137,7 +140,14 @@ def load_checkpoint(run, env):
 
 
 def choose_actions(mode, actors, observations, states, masks, avail,
-                   dc_setpoint=None, dc_min_setpoint=None):
+                   dc_setpoint=None, dc_min_setpoint=None,
+                   previous_facility_load_kw=None, running_peak_kw=None,
+                   battery_soc=None, queue_depth=None, begin_step=None):
+    """Return proposed and executed actions for one interval.
+
+    With ``begin_step`` (battery.observation_timing 'current'), the battery
+    actor sees the observation it returns after the earlier actors choose.
+    """
     proposed = []
     if mode == 'noop':
         return [1, 1, 2], [1, 1, 2]
@@ -146,9 +156,35 @@ def choose_actions(mode, actors, observations, states, masks, avail,
             raise ValueError('cold-noop requires current and minimum DC setpoints')
         actions = [1, 0 if dc_setpoint > dc_min_setpoint else 1, 2]
         return actions, actions.copy()
+    if mode == 'noop-trailing-peak-battery':
+        if (
+            running_peak_kw is not None and running_peak_kw > 0
+            and battery_soc is not None and battery_soc > 0
+            and previous_facility_load_kw is not None
+            and previous_facility_load_kw >= running_peak_kw
+        ):
+            return [1, 1, 1], [1, 1, 1]
+        return [1, 1, 2], [1, 1, 2]
+    if mode == 'trailing-peak-workload-battery':
+        has_prior_peak = running_peak_kw is not None and running_peak_kw > 0
+        previous_at_peak = (
+            previous_facility_load_kw is not None
+            and has_prior_peak
+            and previous_facility_load_kw >= running_peak_kw
+        )
+        if previous_at_peak:
+            battery_action = 1 if battery_soc is not None and battery_soc > 0 else 2
+            return [0, 1, battery_action], [0, 1, battery_action]
+        if has_prior_peak and queue_depth is not None and queue_depth > 0:
+            return [2, 1, 2], [2, 1, 2]
+        return [1, 1, 2], [1, 1, 2]
     with torch.no_grad():
         for i, actor in enumerate(actors):
-            action, state = actor.act(np.asarray(observations[i])[None], states[i], masks[i], np.asarray(avail[i])[None], deterministic=True)
+            if begin_step is not None and i == AGENTS.index('agent_bat'):
+                obs_i = begin_step(list(proposed))
+            else:
+                obs_i = observations[i]
+            action, state = actor.act(np.asarray(obs_i)[None], states[i], masks[i], np.asarray(avail[i])[None], deterministic=True)
             states[i] = state.cpu().numpy()
             proposed.append(int(action.cpu().numpy().reshape(-1)[0]))
     executed = proposed.copy()
@@ -172,14 +208,30 @@ def run_episode(config, actors, mode, day, seed, max_steps=None):
         masks = [np.ones((1, 1), dtype=np.float32) for _ in AGENTS]
         rows, exogenous = [], []
         metrics = FacilityMetricAccumulator('episode')
+        sequential = raw.battery_config['observation_timing'] == 'current'
         for step in range(max_steps):
             common = raw.infos['__common__']
             exo = (float(common['workload']), float(common['weather']), float(common['ci']), float(raw.pv_m.get_current_ac_kwh()))
+            begun = []
+
+            def begin_step(ls_dc_actions):
+                begun.append(True)
+                return env.begin_step(np.asarray(ls_dc_actions))
+
             proposed, executed = choose_actions(
                 mode, actors, obs, states, masks, avail,
                 dc_setpoint=raw.dc_env.raw_curr_stpt,
                 dc_min_setpoint=raw.dc_env.min_temp,
+                previous_facility_load_kw=raw._previous_facility_load_kw,
+                running_peak_kw=raw.price_m.state.running_peak_kw,
+                battery_soc=raw.bat_env.get_battery_soc(),
+                queue_depth=len(raw.ls_env.tasks_queue),
+                begin_step=begin_step if sequential else None,
             )
+            if sequential and not begun:
+                # Rule modes choose without the mid-step observation; the
+                # environment still meters workload/cooling before dispatch.
+                env.begin_step(np.asarray(executed[:2]))
             padded_obs, _, term, trunc, info = env.env.step(dict(zip(AGENTS, executed)))
             obs = [padded_obs[a] for a in AGENTS]
             values = info[AGENTS[0]]

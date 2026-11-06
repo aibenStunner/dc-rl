@@ -247,6 +247,56 @@ def test_pricing_meter_receives_net_grid_import_not_gross_dc_energy():
     assert battery_info["bat_grid_import_kwh"] <= battery_info["bat_dc_load_kwh"] + battery_info["bat_charge_bus_KWh"]
 
 
+def test_agent_price_block_uses_decision_clock_while_billing_uses_interval_clock():
+    """Agents see the price of the interval they act in next; billing and the
+    billing-reconciliation info fields stay on the interval just consumed."""
+    config = dict(_ENV_CONFIG, pricing={
+        "model": "time_of_use",
+        "config_file": "data/Pricing/time_of_use_example.yaml",
+        "options": {},
+    })
+    env = SustainDC(config)
+    env.reset()
+    env.t_m.day = 150
+    env.t_m.hour = 15.75
+    env.current_hour = 15.75
+    obs, _, _, _, info = env.step({"agent_ls": 1, "agent_dc": 1, "agent_bat": 2})
+    common = info["__common__"]
+    # The example tariff charges 6 c/kWh in hour 15 and 9 c/kWh in hour 16;
+    # its normalizer is the 9 c/kWh daily maximum.
+    assert (common["billed_day"], common["billed_hour"]) == (150, 15.75)
+    assert (common["next_state_day"], common["next_state_hour"]) == (150, 16.0)
+    assert common["price_denorm_c_per_kwh"] == 6.0
+    assert abs(common["norm_price"] - 6.0 / 9.0) < 1e-6
+    assert abs(common["energy_cost_this_step_c"]
+               - common["bat_grid_import_kwh"] * 6.0) < 1e-6
+    assert env._price_feature_block()[0] == 1.0
+    for agent in env.agents:
+        assert obs[agent][-3] == 1.0, agent
+
+
+def test_decision_price_observation_does_not_change_billing_state():
+    config = dict(_ENV_CONFIG, pricing={
+        "model": "time_of_use",
+        "config_file": "data/Pricing/time_of_use_example.yaml",
+        "options": {},
+    })
+    env = SustainDC(config)
+    env.reset()
+    env.step(_step_actions(env))
+    manager = env.price_m
+    state = (manager.state.billing_period_energy_kwh, manager.state.running_peak_kw,
+             dict(manager.state.model_state))
+    billed = (manager.get_current_price(), manager.get_current_price_denorm(),
+              manager.get_total_cost_this_step_c())
+    manager.observe_decision_clock(day_of_year=150, hour=16.0)
+    assert (manager.state.billing_period_energy_kwh, manager.state.running_peak_kw,
+            dict(manager.state.model_state)) == state
+    assert (manager.get_current_price(), manager.get_current_price_denorm(),
+            manager.get_total_cost_this_step_c()) == billed
+    assert manager.get_decision_price() == 1.0
+
+
 def test_price_feature_block_remains_three_values():
     env = _make_env()
     env.reset()

@@ -108,6 +108,21 @@ class EnvConfig(dict):
             'degradation_cost_c_per_kwh': 5.78,
             'initial_soc': 0.0,
             'peak_charge_headroom': False,
+            # 'running_peak': charging may lift grid import up to the billing
+            # running peak. 'tariff': up to the pricing model's
+            # charge_import_limit_kw (on winter Rate L also the daily 110 %
+            # contract-power threshold). Requires peak_charge_headroom.
+            'peak_charge_headroom_basis': 'running_peak',
+            'discharge_mode': 'fixed_rate',
+            # peak_limit only: a declared expected monthly peak (kW). Discharge
+            # holds import at max(running peak, this floor). None disables it;
+            # no value is inferred.
+            'discharge_peak_floor_kw': None,
+            # 'previous': the battery observes the previous interval's gross
+            # facility load. 'current': the battery decides after workload and
+            # cooling act, seeing this interval's metered gross load
+            # (SustainDC.begin_step must precede step).
+            'observation_timing': 'previous',
             'power_fraction': None,
             'duration_hours': None,
             'rated_power_mw': None,
@@ -212,6 +227,26 @@ def _validate_env_config(config):
     battery = config['battery']
     if not isinstance(battery['peak_charge_headroom'], bool):
         raise ValueError('battery.peak_charge_headroom must be a boolean')
+    if not isinstance(battery['discharge_mode'], str) or \
+            battery['discharge_mode'] not in ('fixed_rate', 'peak_limit'):
+        raise ValueError("battery.discharge_mode must be 'fixed_rate' or 'peak_limit'")
+    basis = battery['peak_charge_headroom_basis']
+    if not isinstance(basis, str) or basis not in ('running_peak', 'tariff'):
+        raise ValueError("battery.peak_charge_headroom_basis must be 'running_peak' or 'tariff'")
+    if basis == 'tariff' and not battery['peak_charge_headroom']:
+        raise ValueError("battery.peak_charge_headroom_basis 'tariff' requires peak_charge_headroom")
+    floor = battery['discharge_peak_floor_kw']
+    if floor is not None:
+        if isinstance(floor, bool) or not isinstance(floor, (int, float, np.integer, np.floating)) \
+                or not np.isfinite(float(floor)) or float(floor) < 0.0:
+            raise ValueError('battery.discharge_peak_floor_kw must be None or finite and non-negative')
+        if battery['discharge_mode'] != 'peak_limit':
+            raise ValueError("battery.discharge_peak_floor_kw requires discharge_mode 'peak_limit'")
+    timing = battery['observation_timing']
+    if not isinstance(timing, str) or timing not in ('previous', 'current'):
+        raise ValueError("battery.observation_timing must be 'previous' or 'current'")
+    if timing == 'current' and (not config['agents'] or list(config['agents'])[-1] != 'agent_bat'):
+        raise ValueError("battery.observation_timing 'current' requires agent_bat as the last agent")
     for key in ('power_fraction', 'duration_hours', 'rated_power_mw', 'capacity_mwh'):
         value = battery[key]
         if value is not None:
@@ -283,6 +318,7 @@ class SustainDC(gym.Env):
         
         self.max_bat_cap_Mw = env_config['max_bat_cap_Mw']
         self.battery_config = env_config['battery']
+        self._pending_ls_dc_actions = None
         self.facility_sizing = env_config['facility_sizing']
         self.battery_sizing = resolve_battery_sizing(env_config)
         self.reward_config = env_config['reward']
@@ -319,6 +355,7 @@ class SustainDC(gym.Env):
         if self.ci_file:
             ci_loc = ""
         
+        self._legacy_energy_history = deque(maxlen=10000)
         ls_reward_method = 'default_ls_reward' if not 'ls_reward' in env_config.keys() else env_config['ls_reward']
         self.ls_reward_method = reward_creator.get_reward_method(ls_reward_method)
 
@@ -347,7 +384,8 @@ class SustainDC(gym.Env):
                                         n_fwd_steps=n_vars_ci,
                                         round_trip_efficiency=self.battery_config['round_trip_efficiency'],
                                         degradation_cost_c_per_kwh=self.battery_config['degradation_cost_c_per_kwh'],
-                                        initial_soc=self.battery_config['initial_soc'])
+                                        initial_soc=self.battery_config['initial_soc'],
+                                        discharge_mode=self.battery_config['discharge_mode'])
 
         self.bat_env.dcload_max = self.dc_env.power_ub_kW / 4  # Assuming 15 minutes timestep. Kwh
         
@@ -528,7 +566,10 @@ class SustainDC(gym.Env):
         "next_out_temp": OBS_PREFIX_LEN + 3,
         "setpoint_ratio": OBS_PREFIX_LEN + 4,
     }
-    # bat_state middle: workload, temperature, SoC, previous gross DC load, billing peak
+    # bat_state middle: workload, temperature, SoC, gross DC load, billing peak.
+    # The gross-load slot holds the previous interval's load in reset/step
+    # observations; begin_step's decision observation ('current' timing)
+    # replaces it with this interval's load, metered before battery dispatch.
     BAT_IDX = {
         "current_workload": OBS_PREFIX_LEN + 0,
         "current_temperature": OBS_PREFIX_LEN + 1,
@@ -547,13 +588,15 @@ class SustainDC(gym.Env):
     def _price_feature_block(self):
         """Return the normalized price, billing progress, and normalized peak.
 
-        Computed once per step and shared by all three state builders,
+        Values describe the next decision interval (the clock every other
+        observation feature is on), after the just-finished interval has been
+        billed. Computed once per step and shared by all three state builders,
         mirroring how the CI block is threaded through.
         """
         return np.array([
-            self.price_m.get_current_price(),
-            self.price_m.get_billing_progress_fraction(),
-            self.price_m.get_normalized_peak(),
+            self.price_m.get_decision_price(),
+            self.price_m.get_decision_billing_progress_fraction(),
+            self.price_m.get_decision_normalized_peak(),
         ], dtype=np.float32)
 
     def _create_ls_state(self, t_i, current_workload, queue_status, current_ci, ci_future, ci_past, next_workload, current_out_temperature, next_out_temperature, next_n_out_temperature, oldest_task_age, average_task_age, ls_task_age_histogram, pv_features, price_features):
@@ -663,6 +706,10 @@ class SustainDC(gym.Env):
         return dc_state
 
 
+    def _facility_load_ratio(self, load_kw):
+        """Gross facility load as a fraction of the facility rating."""
+        return load_kw / (self.datacenter_capacity_mw * 1000.0)
+
     def _create_bat_state(self, t_i, current_workload, battery_soc, current_ci, ci_future, ci_past, current_temperature, pv_features, price_features, previous_facility_load_kw):
         """
         Create the state of the battery environment.
@@ -700,7 +747,7 @@ class SustainDC(gym.Env):
                                           current_workload,
                                           current_temperature,
                                           battery_soc,
-                                          previous_facility_load_kw / (self.datacenter_capacity_mw * 1000.0),
+                                          self._facility_load_ratio(previous_facility_load_kw),
                                           self.price_m.state.running_peak_kw / (self.datacenter_capacity_mw * 1000.0),
                                           pv_features,
                                           price_features
@@ -755,6 +802,7 @@ class SustainDC(gym.Env):
         # Reset termination and reward flags for all agents
         self.ls_terminated = self.dc_terminated = self.bat_terminated = False
         self.ls_truncated = self.dc_truncated = self.bat_truncated = False
+        self._legacy_energy_history.clear()
         self.ls_reward = self.dc_reward = self.bat_reward = 0
 
         # Reset the managers. Ordinary resets intentionally start independent
@@ -805,6 +853,7 @@ class SustainDC(gym.Env):
         self._episode_start_soc = self.bat_env.get_battery_soc()
         self._terminal_soc_settled = False
         self._previous_facility_load_kw = 0.0
+        self._pending_ls_dc_actions = None
 
         current_workload = self.workload_m.get_current_workload()
         next_workload = self.workload_m.get_next_workload()
@@ -894,7 +943,18 @@ class SustainDC(gym.Env):
         billed_day, billed_hour = self.t_m.day, self.current_hour
 
         # Perform actions for each agent and update their respective environments
-        self._perform_actions(action_dict)
+        if self.battery_config['observation_timing'] == 'current':
+            pending = self._pending_ls_dc_actions
+            if pending is None:
+                raise RuntimeError("battery.observation_timing 'current' requires begin_step before step")
+            for agent, action in pending.items():
+                if agent not in action_dict or \
+                        not np.array_equal(np.asarray(action_dict[agent]), np.asarray(action)):
+                    raise ValueError(f'step action for {agent} differs from begin_step')
+            self._pending_ls_dc_actions = None
+            self._perform_battery_action(action_dict)
+        else:
+            self._perform_actions(action_dict)
         self._previous_facility_load_kw = self.dc_info['dc_total_power_kW']
 
         # Step the managers (time, workload, weather, CI) (t+1)
@@ -913,6 +973,9 @@ class SustainDC(gym.Env):
             day_of_year=billed_day,
             hour=billed_hour,
         )
+        # Agents act next on the advanced clock; observe its price there
+        # without touching the charges above.
+        self.price_m.observe_decision_clock(day_of_year=day, hour=hour)
 
         self.current_hour = hour
 
@@ -989,8 +1052,38 @@ class SustainDC(gym.Env):
         return obs, rew, terminateds, truncateds, info
 
 
+    def begin_step(self, action_dict):
+        """Run this interval's workload and cooling; return the battery decision observation.
+
+        Only for battery.observation_timing 'current'. The returned array equals
+        the battery observation from the last reset/step except that the
+        gross-load slot holds this interval's facility load, metered after
+        workload and cooling act and before battery dispatch. The clock,
+        prices, billing peak and battery are not advanced; step() must follow
+        with the same workload and cooling actions plus the battery action.
+        """
+        if self.battery_config['observation_timing'] != 'current':
+            raise RuntimeError("begin_step requires battery.observation_timing 'current'")
+        if self._pending_ls_dc_actions is not None:
+            raise RuntimeError('begin_step already called for this interval; call step next')
+        expected = [agent for agent in self.agents if agent != 'agent_bat']
+        if set(action_dict) != set(expected):
+            raise ValueError(f'begin_step expects actions for exactly {expected}')
+        bat_obs = np.array(self.bat_state, dtype=np.float32, copy=True)
+        pending = {agent: copy.deepcopy(action_dict[agent]) for agent in expected}
+        self._perform_ls_dc_actions(pending)
+        self._pending_ls_dc_actions = pending
+        bat_obs[self.BAT_IDX['previous_facility_load_ratio']] = np.float32(
+            self._facility_load_ratio(self.dc_info['dc_total_power_kW']))
+        return bat_obs
+
     def _perform_actions(self, action_dict):
         """Execute actions for each agent and update their respective environments."""
+        self._perform_ls_dc_actions(action_dict)
+        self._perform_battery_action(action_dict)
+
+    def _perform_ls_dc_actions(self, action_dict):
+        """Run the workload-shifting and cooling sub-environments for this interval."""
         # Load shifting agent
         if "agent_ls" in self.agents:
             action = action_dict["agent_ls"]
@@ -1010,6 +1103,8 @@ class SustainDC(gym.Env):
         self.dc_env.set_shifted_wklds(self.ls_info['ls_shifted_workload'])
         self.dc_state, _, self.dc_terminated, self.dc_truncated, self.dc_info = self.dc_env.step(action)
 
+    def _perform_battery_action(self, action_dict):
+        """Dispatch the battery against the gross load metered for this interval."""
         # Battery agent
         if "agent_bat" in self.agents:
             action = action_dict["agent_bat"]
@@ -1020,7 +1115,17 @@ class SustainDC(gym.Env):
         self.bat_env.set_dcload(self.dc_info['dc_total_power_kW'] / 1e3)
         self.bat_env.set_pv_ac_energy_kwh(self.pv_m.get_current_ac_kwh())
         if self.battery_config['peak_charge_headroom']:
-            self.bat_env.set_grid_import_peak_kw(self.price_m.state.running_peak_kw)
+            if self.battery_config['peak_charge_headroom_basis'] == 'tariff':
+                charge_limit_kw = self.price_m.get_charge_import_limit_kw()
+            else:
+                charge_limit_kw = self.price_m.state.running_peak_kw
+            self.bat_env.set_grid_import_peak_kw(charge_limit_kw)
+        if self.battery_config['discharge_mode'] == 'peak_limit':
+            discharge_target_kw = self.price_m.state.running_peak_kw
+            floor_kw = self.battery_config['discharge_peak_floor_kw']
+            if floor_kw is not None:
+                discharge_target_kw = max(discharge_target_kw, float(floor_kw))
+            self.bat_env.set_discharge_peak_target_kw(discharge_target_kw)
         self.bat_state, _, self.bat_terminated, self.bat_truncated, self.bat_info = self.bat_env.step(action)
 
 
@@ -1182,9 +1287,27 @@ class SustainDC(gym.Env):
                 rewards["agent_bat"],
             )
 
-        ls_reward = self.ls_reward_method(params)
-        dc_reward = self.dc_reward_method(params)
-        bat_reward = self.bat_reward_method(params)
+        history = self._legacy_energy_history
+        if any(method is default for method, default in (
+            (self.ls_reward_method, reward_creator.default_ls_reward),
+            (self.dc_reward_method, reward_creator.default_dc_reward),
+            (self.bat_reward_method, reward_creator.default_bat_reward),
+        )):
+            reward_creator.update_energy_history(
+                params['bat_total_energy_with_battery_KWh'], history
+            )
+        if self.ls_reward_method is reward_creator.default_ls_reward:
+            ls_reward = self.ls_reward_method(params, history)
+        else:
+            ls_reward = self.ls_reward_method(params)
+        if self.dc_reward_method is reward_creator.default_dc_reward:
+            dc_reward = self.dc_reward_method(params, history)
+        else:
+            dc_reward = self.dc_reward_method(params)
+        if self.bat_reward_method is reward_creator.default_bat_reward:
+            bat_reward = self.bat_reward_method(params, history)
+        else:
+            bat_reward = self.bat_reward_method(params)
         return ls_reward, dc_reward, bat_reward
         
     def close(self):

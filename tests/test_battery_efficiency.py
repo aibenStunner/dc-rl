@@ -192,6 +192,25 @@ def test_grid_meter_uses_bus_energy_and_reported_degradation_uses_cell_throughpu
     assert idle_info["bat_cumulative_cell_throughput_KWh"] == info["bat_cell_throughput_KWh"]
 
 
+def test_requested_power_respects_rated_limit_before_delivery():
+    env = _env(max_bat_cap=2.0, rated_power_mw=0.4, initial_soc=0.5)
+    env.reset()
+    env.set_dcload(2.0)
+    for action, flow_key in ((0, 'bat_charge_bus_KWh'), (1, 'bat_discharge_bus_KWh')):
+        _, _, _, _, info = env.step(action)
+        assert info['bat_requested_power_mw'] <= 0.4 + 1e-12
+        assert info[flow_key] / 250.0 <= info['bat_requested_power_mw'] + 1e-12
+
+
+def test_requested_power_can_exceed_delivered_at_soc_bound():
+    env = _env(max_bat_cap=1.0, rated_power_mw=0.4, initial_soc=1.0)
+    env.reset()
+    env.set_dcload(2.0)
+    _, _, _, _, info = env.step(0)
+    assert info['bat_requested_power_mw'] > 0.0
+    assert info['bat_charge_bus_KWh'] == 0.0
+
+
 def test_report_only_degradation_does_not_change_grid_meter_or_reward_input():
     costly = _env(degradation_cost_c_per_kwh=5.78)
     free = _env(degradation_cost_c_per_kwh=0.0)

@@ -21,6 +21,7 @@ from harl.algorithms.critics import CRITIC_REGISTRY
 from harl.common.buffers.off_policy_buffer_ep import OffPolicyBufferEP
 from harl.common.buffers.off_policy_buffer_fp import OffPolicyBufferFP
 from harl.envs import LOGGER_REGISTRY
+from harl.envs.sustaindc.sequential import sequential_battery_index
 
 class OffPolicyBaseRunner:
     """Base runner for off-policy algorithms."""
@@ -37,6 +38,10 @@ class OffPolicyBaseRunner:
         self.algo_args = algo_args
         self.env_args = env_args
         self._closed = False
+        if args["env"] == "sustaindc" and sequential_battery_index(env_args) is not None:
+            raise NotImplementedError(
+                "battery.observation_timing 'current' is only supported by on-policy runners"
+            )
 
         if "policy_freq" in self.algo_args["algo"]:
             self.policy_freq = self.algo_args["algo"]["policy_freq"]

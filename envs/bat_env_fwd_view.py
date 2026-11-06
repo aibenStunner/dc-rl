@@ -20,6 +20,9 @@ class BatteryEnvFwd(gym.Env):
             env_config['degradation_cost_c_per_kwh']
         )
         self.initial_soc = _validate_initial_soc(env_config.get('initial_soc', 0.0))
+        self.discharge_mode = _validate_discharge_mode(
+            env_config.get('discharge_mode', 'fixed_rate')
+        )
         observation_high = np.ones(29, dtype=np.float32)
         observation_high[15:17] = 10.0
         self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(29)),
@@ -52,10 +55,12 @@ class BatteryEnvFwd(gym.Env):
         self.dcload_max = env_config['dcload_max']
         self.dcload_min = env_config['dcload_min']
         self.grid_import_peak_kw = None
+        self.discharge_peak_target_kw = None
         self._reset_episode_metrics()
 
     def _reset_episode_metrics(self):
         self.last_flow = batt.BatteryFlow()
+        self.last_requested_power_mw = 0.0
         self.total_energy_with_battery = 0.0
         self.CO2_total = 0.0
         self.pv_ac_kwh = 0.0
@@ -70,6 +75,7 @@ class BatteryEnvFwd(gym.Env):
         self._reset_episode_metrics()
         self.dcload = self.dcload_min
         self.grid_import_peak_kw = None
+        self.discharge_peak_target_kw = None
         self.raw_obs = self._hist_data_collector()
         self.temp_state = self._process_obs(self.raw_obs)
         return self.temp_state, self._info(action_id=-1, action_name='idle')
@@ -88,6 +94,11 @@ class BatteryEnvFwd(gym.Env):
         flow = self.last_flow
         return {
             'bat_action': action_id,
+            'bat_requested_action': action_name,
+            'bat_requested_power_mw': self.last_requested_power_mw,
+            'bat_delivered_bus_power_mw': (
+                (flow.charge_bus_mwh - flow.discharge_bus_mwh) / self.STEP_HOURS
+            ),
             'bat_SOC': self.get_battery_soc(),
             'bat_CO2_footprint': self.CO2_total,
             'bat_avg_CI': self.ci,
@@ -132,6 +143,12 @@ class BatteryEnvFwd(gym.Env):
             raise ValueError('peak_kw must be finite and non-negative')
         self.grid_import_peak_kw = float(peak_kw)
 
+    def set_discharge_peak_target_kw(self, target_kw):
+        """Grid-import level that peak_limit discharge shaves down to."""
+        if isinstance(target_kw, bool) or not math.isfinite(float(target_kw)) or float(target_kw) < 0.0:
+            raise ValueError('target_kw must be finite and non-negative')
+        self.discharge_peak_target_kw = float(target_kw)
+
     def set_pv_ac_energy_kwh(self, pv_ac_kwh):
         if isinstance(pv_ac_kwh, bool) or not math.isfinite(float(pv_ac_kwh)) or float(pv_ac_kwh) < 0.0:
             raise ValueError("pv_ac_kwh must be finite and non-negative")
@@ -144,6 +161,7 @@ class BatteryEnvFwd(gym.Env):
         return np.array([self.dcload, self.battery.current_load])
 
     def _simulate_battery_operation(self, battery, action_name):
+        self.last_requested_power_mw = 0.0
         if action_name == 'charge':
             requested_power = self.charging_rate_modifier(battery)
             if self.grid_import_peak_kw is not None:
@@ -151,9 +169,22 @@ class BatteryEnvFwd(gym.Env):
                 pv_kw = self.pv_ac_kwh / self.STEP_HOURS
                 headroom_kw = max(0.0, self.grid_import_peak_kw - base_kw + pv_kw)
                 requested_power = min(requested_power, headroom_kw / 1000.0)
+            if battery.rated_power_mw is not None:
+                requested_power = min(requested_power, battery.rated_power_mw)
+            self.last_requested_power_mw = requested_power
             return battery.charge(requested_power, self.STEP_HOURS)
         if action_name == 'discharge':
             requested_power = self.discharging_rate_modifier(battery)
+            if self.discharge_mode == 'peak_limit':
+                if self.discharge_peak_target_kw is None:
+                    raise ValueError('peak_limit discharge requires a target; '
+                                     'call set_discharge_peak_target_kw first')
+                net_kw = self.dcload * 1000.0 - self.pv_ac_kwh / self.STEP_HOURS
+                excess_kw = max(0.0, net_kw - self.discharge_peak_target_kw)
+                requested_power = min(requested_power, excess_kw / 1000.0)
+            if battery.rated_power_mw is not None:
+                requested_power = min(requested_power, battery.rated_power_mw)
+            self.last_requested_power_mw = requested_power
             return battery.discharge(requested_power, self.STEP_HOURS, self.dcload)
         return batt.BatteryFlow()
 
@@ -209,6 +240,12 @@ def _validate_degradation_cost(value):
     if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
         raise ValueError('degradation_cost_c_per_kwh must be finite and non-negative')
     return float(value)
+
+
+def _validate_discharge_mode(value):
+    if not isinstance(value, str) or value not in ('fixed_rate', 'peak_limit'):
+        raise ValueError("discharge_mode must be 'fixed_rate' or 'peak_limit'")
+    return value
 
 
 def _validate_initial_soc(value):

@@ -1,7 +1,7 @@
 """Paired capacity-scaling verification for the scaled SustainDC scenario.
 
-Runs ten matched 30-day episodes at 1 MW and 10 MW with identical seeds,
-start days and fixed actions, and reports facility/energy/battery outcomes.
+Runs ten matched complete calendar-month episodes at 1 MW and 10 MW with
+identical seeds, start days and fixed actions, and reports outcomes.
 Read-only: it writes nothing into the repository.
 """
 import random
@@ -14,8 +14,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from harl.utils.configs_tools import get_defaults_yaml_args
 from sustaindc_env import EnvConfig, SustainDC
+from utils.managers.pricing.models.hydro_quebec import _MONTH_START_DAYS
 
-START_DAYS = [68, 28, 121, 120, 318, 293, 165, 116, 237, 292]
+START_DAYS = random.Random(2026).sample(_MONTH_START_DAYS, 10)
 ACTIONS = {"agent_ls": 1, "agent_dc": 1, "agent_bat": 2}   # no-op, hold setpoint, idle
 
 
@@ -42,6 +43,7 @@ def build(capacity_mw):
     config = dict(env_args)
     config["datacenter_capacity_mw"] = capacity_mw
     config["days_per_episode"] = 30
+    config["episode_start_policy"] = "calendar_month"
     config["sample_whole_year"] = False
     config["month"] = 6
     return SustainDC(EnvConfig(config))
@@ -62,8 +64,10 @@ def run(capacity_mw, dispatch=False):
                   "charge_kwh": 0.0, "discharge_kwh": 0.0, "pv_kwh": 0.0,
                   "max_charge_kw": 0.0, "max_discharge_kw": 0.0,
                   "min_soc": 1.0, "max_soc": 0.0, "curtailed_kwh": 0.0}
-        for step in range(2880):
+        for step in range(env.t_m.simulated_total_timesteps):
             action = dispatch_actions(step) if dispatch else ACTIONS
+            if env.battery_config["observation_timing"] == "current":
+                env.begin_step({a: action[a] for a in ("agent_ls", "agent_dc")})
             _, _, _, _, info = env.step(action)
             common = info["__common__"]
             dc = info["agent_dc"]

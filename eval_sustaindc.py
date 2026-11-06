@@ -89,11 +89,17 @@ eval_masks = np.ones(
                         dtype=np.float32,
                     )
 
+battery_index = getattr(expt_runner, "sequential_battery_index", None)
 while True:
     eval_actions_collector = []
     for agent_id in range(expt_runner.num_agents):
+        actor_obs = np.stack(eval_obs[:, agent_id], axis=0)
+        if agent_id == battery_index:
+            actor_obs = expt_runner.eval_envs.begin_step(
+                np.array(eval_actions_collector).transpose(1, 0, 2)
+            )
         eval_actions, temp_rnn_state = expt_runner.actor[agent_id].act(
-            eval_obs[:, agent_id],
+            actor_obs,
             eval_rnn_states[:, agent_id],
             eval_masks[:, agent_id],
             eval_available_actions[:, agent_id]

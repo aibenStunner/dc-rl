@@ -43,6 +43,26 @@ battery:
   initial_soc: 0.5
   # Keep charging from establishing a new billing peak; PV surplus remains usable.
   peak_charge_headroom: true
+  # running_peak: charging may lift grid import up to the billing running peak.
+  # tariff: up to the pricing model's charge_import_limit_kw; on winter Rate L
+  # that is also the daily 110% contract-power threshold until the month's
+  # optimization charge reaches its cap.
+  peak_charge_headroom_basis: tariff
+  # fixed_rate: a discharge action delivers the SOC rate curve (capped by load).
+  # peak_limit: a discharge action delivers only net import (load - PV) above
+  # the pre-step billing running peak, capped by the same curve. The running
+  # peak starts each month at the demand floor (0 kW on Rate M, 5000 kW on
+  # Rate L), so arming while it is low drains the battery like fixed_rate.
+  discharge_mode: peak_limit
+  # 10 MW pilot: 6,310 kW was selected on Feb/May/Aug/Nov of seed 102,
+  # then checked on Jan/Apr/Jul/Oct; scenario-specific, not a universal limit.
+  # When overriding capacity to 1 MW, also override this floor (e.g. null).
+  discharge_peak_floor_kw: 6310.0
+  # current: the battery decides after an EMS meter reading of this interval's
+  # facility load, taken once workload and cooling have acted and before
+  # battery dispatch. previous: it sees only the previous interval's load.
+  # Saved checkpoint configs without this key load as previous.
+  observation_timing: current
 # Experiment 1 uses separate targeted returns, so HAPPO must preserve all
 # three reward columns through the FP critic path.
 state_type: FP
@@ -65,7 +85,7 @@ reward:
 
 # Capacity (MW) of the datacenter -- also drives Hydro-Quebec tariff
 # auto-selection (Rate M below 5,000 kW / 5 MW, Rate L at/above).
-datacenter_capacity_mw: 1
+datacenter_capacity_mw: 10
 
 pricing:
   model: hydro_quebec

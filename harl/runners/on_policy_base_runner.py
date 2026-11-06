@@ -2,7 +2,10 @@
 
 import os
 import csv
+import json
+import shutil
 import time
+from pathlib import Path
 import numpy as np
 import torch
 import setproctitle
@@ -24,6 +27,13 @@ from harl.utils.models_tools import init_device
 from harl.utils.configs_tools import init_dir, save_config
 from harl.envs import LOGGER_REGISTRY
 from harl.envs.sustaindc.metrics import build_trace_row, write_trace_csv
+from harl.envs.sustaindc.sequential import sequential_battery_index
+from harl.envs.sustaindc.fixed_month_validation import (
+    ValidationResult,
+    eligible as validation_eligible,
+    select_best as select_validation_best,
+    validate_fixed_months,
+)
 
 
 def select_ep_team_rewards(rewards: np.ndarray, *, atol: float = 1e-7) -> np.ndarray:
@@ -53,6 +63,11 @@ class OnPolicyBaseRunner:
         self.algo_args = algo_args
         self.env_args = env_args
         self._closed = False
+        # SustainDC battery.observation_timing 'current': the battery actor
+        # decides on begin_step's observation of this interval's gross load.
+        self.sequential_battery_index = (
+            sequential_battery_index(env_args) if args["env"] == "sustaindc" else None
+        )
 
         self.hidden_sizes = algo_args["model"]["hidden_sizes"]
         self.rnn_hidden_size = self.hidden_sizes[-1]
@@ -69,6 +84,9 @@ class OnPolicyBaseRunner:
         self.dump_render_info = algo_args["render"].get('dump_render_metrics', False)
         self.eval_event = 0
         self.completed_eval_trace_paths = []
+        self.fixed_validation = dict(algo_args["eval"].get("fixed_month_validation", {}))
+        self.fixed_validation_enabled = bool(self.fixed_validation.get("enabled", False))
+        self.validation_event = 0
         
         set_seed(algo_args["seed"])
         self.device = init_device(algo_args["device"])
@@ -323,14 +341,19 @@ class OnPolicyBaseRunner:
                     self.critic_buffer,
                 )
 
-            # eval
+            # Evaluation either retains legacy reward-ranked vector behavior or
+            # uses explicit fixed-month objective validation when enabled.
             if episode % self.algo_args["train"]["eval_interval"] == 0:
-                if self.algo_args["eval"]["use_eval"]:
+                if self.fixed_validation_enabled:
                     self.prep_rollout()
-                    self.update_chkpoints = self.eval()
-                if self.update_chkpoints:
-                    self.save()
-                    self.update_chkpoints = False
+                    self._run_fixed_month_validation()
+                else:
+                    if self.algo_args["eval"]["use_eval"]:
+                        self.prep_rollout()
+                        self.update_chkpoints = self.eval()
+                    if self.update_chkpoints:
+                        self.save()
+                        self.update_chkpoints = False
                     
             if episode % self.algo_args["train"].get("render_interval",1) == 0 and self.algo_args["render"]["use_render"] is True:
                 self.render()
@@ -365,7 +388,14 @@ class OnPolicyBaseRunner:
         action_collector = []
         action_log_prob_collector = []
         rnn_state_collector = []
+        battery_index = getattr(self, "sequential_battery_index", None)
         for agent_id in range(self.num_agents):
+            if agent_id == battery_index:
+                # Store the decision observation so training replays what the
+                # battery policy actually conditioned on.
+                self.actor_buffer[agent_id].obs[step] = self.envs.begin_step(
+                    np.array(action_collector).transpose(1, 0, 2)
+                )
             action, action_log_prob, rnn_state = self.actor[agent_id].get_actions(
                 self.actor_buffer[agent_id].obs[step],
                 self.actor_buffer[agent_id].rnn_states[step],
@@ -604,11 +634,17 @@ class OnPolicyBaseRunner:
             dtype=np.float32,
         )
 
+        battery_index = getattr(self, "sequential_battery_index", None)
         while True:
             eval_actions_collector = []
             for agent_id in range(self.num_agents):
+                actor_obs = np.stack(eval_obs[:, agent_id], axis=0)
+                if agent_id == battery_index:
+                    actor_obs = self.eval_envs.begin_step(
+                        np.array(eval_actions_collector).transpose(1, 0, 2)
+                    )
                 eval_actions, temp_rnn_state = self.actor[agent_id].act(
-                    np.stack(eval_obs[:, agent_id], axis=0),
+                    actor_obs,
                     eval_rnn_states[:, agent_id],
                     eval_masks[:, agent_id],
                     eval_available_actions[:, agent_id]
@@ -855,11 +891,17 @@ class OnPolicyBaseRunner:
                 (self.env_num, self.num_agents, 1), dtype=np.float32
             )
             rewards = 0
+            battery_index = getattr(self, "sequential_battery_index", None)
             while True:
                 eval_actions_collector = []
                 for agent_id in range(self.num_agents):
+                    actor_obs = np.stack(eval_obs[:, agent_id], axis=0)
+                    if agent_id == battery_index:
+                        actor_obs = self.render_env.begin_step(
+                            np.array(eval_actions_collector).transpose(1, 0, 2)[0]
+                        )[None]
                     eval_actions, temp_rnn_state = self.actor[agent_id].act(
-                        np.stack(eval_obs[:, agent_id], axis=0),
+                        actor_obs,
                         eval_rnn_states[:, agent_id],
                         eval_masks[:, agent_id],
                         eval_available_actions[:, agent_id]
@@ -991,6 +1033,81 @@ class OnPolicyBaseRunner:
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_training()
         self.critic.prep_training()
+
+    def _run_fixed_month_validation(self):
+        """Validate and retain objective-ranked complete-month candidates."""
+        self.validation_event += 1
+        validation_dir = Path(self.save_dir) / "candidates"
+        report = validate_fixed_months(
+            env_args=self.env_args,
+            actors=self.actor,
+            recurrent_n=self.recurrent_n,
+            rnn_hidden_size=self.rnn_hidden_size,
+            seed=int(self.fixed_validation.get("seed", self.algo_args["seed"]["seed"])),
+            event=self.validation_event,
+            output_dir=validation_dir / "traces",
+        )
+        event_dir = validation_dir / f"event-{report.event}"
+        event_dir.mkdir(parents=True, exist_ok=False)
+        report_json = report.to_json()
+        report_json["eligible"] = validation_eligible(report, self.fixed_validation)
+        (event_dir / "validation.json").write_text(json.dumps(report_json, indent=2, allow_nan=False))
+        if report_json["eligible"]:
+            self._save_checkpoint_directory(event_dir)
+        candidates = self._load_validation_candidates(validation_dir)
+        candidates.append(report_json)
+        retained = self._retain_validation_candidates(validation_dir, candidates)
+        winner = select_validation_best(
+            [ValidationResult(event=item["event"], cases=tuple(item["cases"]), aggregate=item["aggregate"])
+             for item in retained], self.fixed_validation,
+        )
+        if winner is not None:
+            self._export_validation_winner(validation_dir / f"event-{winner.event}")
+
+    def _load_validation_candidates(self, validation_dir):
+        manifest = validation_dir / "manifest.json"
+        if not manifest.is_file():
+            return []
+        return list(json.loads(manifest.read_text())["candidates"])
+
+    def _retain_validation_candidates(self, validation_dir, candidates):
+        results = [ValidationResult(event=item["event"], cases=tuple(item["cases"]), aggregate=item["aggregate"])
+                   for item in candidates]
+        ranked = sorted(
+            (result for result in results if validation_eligible(result, self.fixed_validation)),
+            key=lambda result: (result.aggregate["episode/tariff/cost/total_c"], result.aggregate["grid_peak_kw"], result.event),
+        )
+        retain_top_k = int(self.fixed_validation.get("retain_top_k", 5))
+        if retain_top_k <= 0:
+            raise ValueError("fixed_month_validation.retain_top_k must be positive")
+        retained_events = {result.event for result in ranked[:retain_top_k]}
+        # Every validation report remains auditable; the retention limit applies
+        # only to eligible tensor snapshots, never to ineligible evidence.
+        retained = [
+            item for item in candidates
+            if not item["eligible"] or item["event"] in retained_events
+        ]
+        preserved_events = {item["event"] for item in retained}
+        for candidate in validation_dir.glob("event-*"):
+            if candidate.is_dir() and int(candidate.name.removeprefix("event-")) not in preserved_events:
+                shutil.rmtree(candidate)
+        manifest = {
+            "ranking": "eligible candidates: aggregate tariff total, then maximum monthly grid peak, then earlier event",
+            "candidates": retained,
+        }
+        (validation_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False))
+        return retained
+
+    def _save_checkpoint_directory(self, directory):
+        for agent_id in range(self.num_agents):
+            torch.save(self.actor[agent_id].actor.state_dict(), directory / f"actor_agent{agent_id}.pt")
+        torch.save(self.critic.critic.state_dict(), directory / "critic_agent.pt")
+        if self.value_normalizer is not None:
+            torch.save(self.value_normalizer.state_dict(), directory / "value_normalizer.pt")
+
+    def _export_validation_winner(self, winner_dir):
+        for checkpoint in winner_dir.glob("*.pt"):
+            shutil.copy2(checkpoint, Path(self.save_dir) / checkpoint.name)
 
     def save(self):
         """Save model parameters."""

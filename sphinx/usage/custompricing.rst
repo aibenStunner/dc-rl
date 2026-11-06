@@ -99,6 +99,18 @@ reward parameters uses these model-neutral keys:
    norm_price
    price_denorm_c_per_kwh
 
+Two clocks are involved in each step. The meter reading is billed at the
+clock of the interval the agents just acted in (``billed_day``,
+``billed_hour``). The three observation values describe the next decision
+interval (``next_state_day``, ``next_state_hour``), the same clock as the
+time, weather, workload, and PV features, and are taken after the billed
+reading has updated the billing state. ``norm_price`` and
+``price_denorm_c_per_kwh`` in ``info`` stay on the billed clock so that
+``energy_cost_this_step_c`` reconciles with the metered energy. The
+terminal state-of-charge restoration price is also the last billed price.
+``PriceManager.observe_decision_clock`` produces the decision observation and
+rejects a model whose ``observe`` changes billing state.
+
 ``default_price_reward`` uses only ``total_price_cost_this_step_c``.
 
 Parameter-file schemas
@@ -194,6 +206,32 @@ Model state and carry state must contain only JSON-like values: ``None``,
 booleans, finite integers/floats, strings, lists, and string-keyed dictionaries.
 Keep open handles, locks, clients, and other ephemeral resources on the model
 instance rather than in shared pricing state.
+
+Optional charging limit
+-----------------------
+
+A model may also implement:
+
+.. code-block:: python
+
+   def charge_import_limit_kw(self, *, context, state, clock):
+       """Grid import (kW) charging may reach in the interval at ``clock``."""
+
+It is read only when the battery config sets
+``peak_charge_headroom_basis: tariff`` (with ``peak_charge_headroom: true``).
+``PriceManager.get_charge_import_limit_kw`` calls it with the decision clock,
+the interval the next ``step`` bills, and requires a finite, non-negative
+number. The method must not change billing state; the manager restores the
+state and raises if it does. Models without the method fall back to the
+running peak, so ``flat``, ``time_of_use``, and ``time_series`` behave as
+``running_peak``.
+
+The Hydro-Québec implementation returns the billing peak (the running peak, or
+the next month's opening peak at a month change). On winter Rate L it lowers
+that to the larger of 110% of contract power and today's peak so far, until the
+month's optimization charge plus today's pending overrun reaches the monthly
+cap. Below the limit, charging adds energy charges but no demand or
+optimization charge to the current month.
 
 Carry state and settlement
 --------------------------

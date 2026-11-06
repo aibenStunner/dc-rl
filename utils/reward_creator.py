@@ -2,18 +2,12 @@
 import numpy as np
 from collections import deque
 
-energy_history = deque(maxlen=10000)
+def update_energy_history(value: float, history: deque):
+    """Append an energy reading to the owning environment's history."""
+    history.append(value)
 
-def update_energy_history(value: float):
-    """
-    Update the global energy history deque with a new value.
 
-    Args:
-        value (float): The new energy value to add.
-    """
-    energy_history.append(value)
-
-def normalize_energy(value: float):
+def normalize_energy(value: float, history: deque):
     """
     Normalize the energy value based on the energy history, clipping outliers.
 
@@ -23,11 +17,11 @@ def normalize_energy(value: float):
     Returns:
         float: The normalized energy value.
     """
-    if len(energy_history) < 2:  # Avoid division by zero with too few samples
+    if len(history) < 2:  # Avoid division by zero with too few samples
         return 0.0  # Default normalized value when history is insufficient
 
     # Convert history to a numpy array for processing
-    history_array = np.array(energy_history)
+    history_array = np.array(history)
 
     # Clip outliers (e.g., values beyond 1.5 times the interquartile range)
     q1 = np.percentile(history_array, 25)
@@ -45,7 +39,7 @@ def normalize_energy(value: float):
     return (value - mean) / (std if std > 0 else 1)  # Prevent division by zero
 
 
-def default_ls_reward(params: dict) -> float:
+def default_ls_reward(params: dict, history: deque = None) -> float:
     """
     Calculates a reward value based on normalized load shifting.
 
@@ -60,8 +54,7 @@ def default_ls_reward(params: dict) -> float:
     """
     # Energy part of the reward
     total_energy = params['bat_total_energy_with_battery_KWh']
-    update_energy_history(total_energy)  # Update the energy history deque
-    norm_total_energy = normalize_energy(total_energy)  # Normalize using the deque
+    norm_total_energy = normalize_energy(total_energy, history or ())
     norm_ci = params['norm_CI']
     
     footprint_reward = -1.0 * (norm_ci * norm_total_energy / 0.50)  # Mean and std reward. Negate to maximize reward and minimize energy consumption
@@ -82,7 +75,7 @@ def default_ls_reward(params: dict) -> float:
     return clipped_reward
 
 
-def default_dc_reward(params: dict) -> float:
+def default_dc_reward(params: dict, history: deque = None) -> float:
     """
     Calculates a reward value based on the data center's total ITE Load and CT Cooling load.
 
@@ -98,7 +91,7 @@ def default_dc_reward(params: dict) -> float:
     """
     # Energy part of the reward
     total_energy = params['bat_total_energy_with_battery_KWh']
-    norm_total_energy = normalize_energy(total_energy)  # Normalize using the deque
+    norm_total_energy = normalize_energy(total_energy, history or ())
     norm_ci = params['norm_CI']
     
     footprint_reward = -1.0 * (norm_ci * norm_total_energy / 0.50)  # Mean and std reward. Negate to maximize reward and minimize energy consumption
@@ -106,7 +99,7 @@ def default_dc_reward(params: dict) -> float:
     return footprint_reward
 
 
-def default_bat_reward(params: dict) -> float:
+def default_bat_reward(params: dict, history: deque = None) -> float:
     """
     Calculates a reward value based on the battery usage.
 
@@ -122,7 +115,7 @@ def default_bat_reward(params: dict) -> float:
     """
     # Energy part of the reward
     total_energy = params['bat_total_energy_with_battery_KWh']
-    norm_total_energy = normalize_energy(total_energy)  # Normalize using the deque
+    norm_total_energy = normalize_energy(total_energy, history or ())
     norm_ci = params['norm_CI']
     
     footprint_reward = -1.0 * (norm_ci * norm_total_energy / 0.50)  # Mean and std reward. Negate to maximize reward and minimize energy consumption

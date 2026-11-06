@@ -36,6 +36,10 @@ class PriceManager:
         self.state = PricingState()
         self._clock: PricingClock | None = None
         self._observation: PricingObservation | None = None
+        # Billing getters describe the interval most recently charged. Agents
+        # act in the following interval, so their observation is kept apart.
+        self._decision_clock: PricingClock | None = None
+        self._decision_observation: PricingObservation | None = None
         self._charges = PricingCharges(0.0, 0.0, 0.0)
 
     @classmethod
@@ -86,6 +90,8 @@ class PriceManager:
         self.state = state
         self._clock = clock
         self._observation = observation
+        self._decision_clock = clock
+        self._decision_observation = observation
         self._charges = PricingCharges(0.0, 0.0, 0.0)
         return observation
 
@@ -128,7 +134,43 @@ class PriceManager:
         self._charges = charges
         self._observation = observation
         self._clock = clock
+        # Until the caller names the next decision clock, the latest billed
+        # observation is the only valid one.
+        self._decision_clock = clock
+        self._decision_observation = observation
         return charges
+
+    def observe_decision_clock(
+        self, *, day_of_year: int, hour: float
+    ) -> PricingObservation:
+        """Observe prices at the clock of the next decision interval.
+
+        Billing state, billed observation, and charges are unchanged; the
+        result feeds only the decision getters.
+        """
+        self._require_reset()
+        clock = _clock(day_of_year, hour)
+        observation = self._observe_without_mutation(clock)
+        self._decision_clock = clock
+        self._decision_observation = observation
+        return observation
+
+    def _observe_without_mutation(self, clock: PricingClock) -> PricingObservation:
+        state_before = _snapshot_state(self.state)
+        try:
+            observation = self._validate_observation(
+                self.model.observe(context=self.context, state=self.state, clock=clock)
+            )
+            _validate_model_state(self.state)
+        except Exception:
+            _restore_state(self.state, state_before)
+            raise
+        if (self.state.billing_period_energy_kwh != state_before.billing_period_energy_kwh
+                or self.state.running_peak_kw != state_before.running_peak_kw
+                or self.state.model_state != state_before.model_state):
+            _restore_state(self.state, state_before)
+            raise ValueError("pricing model observe() must not mutate billing state")
+        return observation
 
     def settle_pending_period(self) -> PricingCharges:
         """Settle an optional model-specific pending billing period charge."""
@@ -136,6 +178,7 @@ class PriceManager:
         state_before = _snapshot_state(self.state)
         charges_before = self._charges
         observation_before = self._observation
+        decision_observation_before = self._decision_observation
         clock_before = self._clock
         assert clock_before is not None
         try:
@@ -154,15 +197,65 @@ class PriceManager:
                 )
             )
             _validate_model_state(self.state)
+            decision_clock = self._decision_clock or clock_before
+            decision_observation = self._observe_without_mutation(decision_clock)
         except Exception:
             _restore_state(self.state, state_before)
             self._charges = charges_before
             self._observation = observation_before
+            self._decision_observation = decision_observation_before
             self._clock = clock_before
             raise
         self._charges = charges
         self._observation = observation
+        self._decision_observation = decision_observation
         return charges
+
+    def get_decision_price(self) -> float:
+        return self._require_decision_observation().normalized_price
+
+    def get_decision_forecast_price(self) -> np.ndarray:
+        return np.array(
+            self._require_decision_observation().forecast_normalized, copy=True
+        )
+
+    def get_decision_price_denorm(self) -> float:
+        return self._require_decision_observation().current_price_c_per_kwh
+
+    def get_decision_billing_progress_fraction(self) -> float:
+        return self._require_decision_observation().billing_progress
+
+    def get_decision_normalized_peak(self) -> float:
+        return self._require_decision_observation().normalized_peak
+
+    def get_charge_import_limit_kw(self) -> float:
+        """Grid import that charging may reach in the decision interval (the
+        one the next `step` bills) without raising demand-type charges, from
+        the model's optional `charge_import_limit_kw`. Energy charges still
+        apply. Models without it fall back to the running peak. Billing state
+        is never changed.
+        """
+        self._require_reset()
+        method = getattr(self.model, "charge_import_limit_kw", None)
+        if method is None:
+            return float(self.state.running_peak_kw)
+        clock = self._decision_clock
+        assert clock is not None
+        state_before = _snapshot_state(self.state)
+        try:
+            result = method(context=self.context, state=self.state, clock=clock)
+            _validate_model_state(self.state)
+        except Exception:
+            _restore_state(self.state, state_before)
+            raise
+        if (self.state.billing_period_energy_kwh != state_before.billing_period_energy_kwh
+                or self.state.running_peak_kw != state_before.running_peak_kw
+                or self.state.model_state != state_before.model_state):
+            _restore_state(self.state, state_before)
+            raise ValueError(
+                "pricing model charge_import_limit_kw() must not mutate billing state"
+            )
+        return _finite_nonnegative_numeric(result, "charge_import_limit_kw")
 
     def get_current_price(self) -> float:
         return self._require_observation().normalized_price
@@ -210,6 +303,11 @@ class PriceManager:
         self._require_reset()
         assert self._observation is not None
         return self._observation
+
+    def _require_decision_observation(self) -> PricingObservation:
+        self._require_reset()
+        assert self._decision_observation is not None
+        return self._decision_observation
 
     def _validate_charges(self, charges: object) -> PricingCharges:
         if not isinstance(charges, PricingCharges):

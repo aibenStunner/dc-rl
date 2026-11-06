@@ -70,6 +70,60 @@ class MatchedTests(unittest.TestCase):
             self.assertEqual(proposed, executed)
             self.assertEqual(executed, [1, expected, 2])
 
+    def test_trailing_peak_battery_is_causal_and_never_charges(self):
+        self.assertIn('noop-trailing-peak-battery', evaluator.MODES)
+        idle = evaluator.choose_actions(
+            'noop-trailing-peak-battery', [], [], [], [], [],
+            previous_facility_load_kw=900.0, running_peak_kw=1000.0,
+            battery_soc=0.5,
+        )
+        discharge = evaluator.choose_actions(
+            'noop-trailing-peak-battery', [], [], [], [], [],
+            previous_facility_load_kw=1000.0, running_peak_kw=1000.0,
+            battery_soc=0.5,
+        )
+        empty = evaluator.choose_actions(
+            'noop-trailing-peak-battery', [], [], [], [], [],
+            previous_facility_load_kw=1200.0, running_peak_kw=1000.0,
+            battery_soc=0.0,
+        )
+        no_prior_peak = evaluator.choose_actions(
+            'noop-trailing-peak-battery', [], [], [], [], [],
+            previous_facility_load_kw=1200.0, running_peak_kw=0.0,
+            battery_soc=0.5,
+        )
+        self.assertEqual(idle, ([1, 1, 2], [1, 1, 2]))
+        self.assertEqual(discharge, ([1, 1, 1], [1, 1, 1]))
+        self.assertEqual(empty, ([1, 1, 2], [1, 1, 2]))
+        self.assertEqual(no_prior_peak, ([1, 1, 2], [1, 1, 2]))
+
+    def test_trailing_peak_workload_battery_defers_then_recovers_queue(self):
+        self.assertIn('trailing-peak-workload-battery', evaluator.MODES)
+        defer_and_discharge = evaluator.choose_actions(
+            'trailing-peak-workload-battery', [], [], [], [], [],
+            previous_facility_load_kw=1000.0, running_peak_kw=1000.0,
+            battery_soc=0.5, queue_depth=10,
+        )
+        recover_queue = evaluator.choose_actions(
+            'trailing-peak-workload-battery', [], [], [], [], [],
+            previous_facility_load_kw=900.0, running_peak_kw=1000.0,
+            battery_soc=0.5, queue_depth=10,
+        )
+        empty_queue = evaluator.choose_actions(
+            'trailing-peak-workload-battery', [], [], [], [], [],
+            previous_facility_load_kw=900.0, running_peak_kw=1000.0,
+            battery_soc=0.5, queue_depth=0,
+        )
+        no_prior_peak = evaluator.choose_actions(
+            'trailing-peak-workload-battery', [], [], [], [], [],
+            previous_facility_load_kw=1200.0, running_peak_kw=0.0,
+            battery_soc=0.5, queue_depth=10,
+        )
+        self.assertEqual(defer_and_discharge, ([0, 1, 1], [0, 1, 1]))
+        self.assertEqual(recover_queue, ([2, 1, 2], [2, 1, 2]))
+        self.assertEqual(empty_queue, ([1, 1, 2], [1, 1, 2]))
+        self.assertEqual(no_prior_peak, ([1, 1, 2], [1, 1, 2]))
+
     def test_saved_scenario_accepts_current_one_mw_and_ten_mw_runs(self):
         for capacity in (1, 10):
             evaluator.validate_saved_scenario({
