@@ -81,5 +81,12 @@ class ScalingPairedCheckTests(unittest.TestCase):
             self.assertEqual(len(rows), 10)
 
 
+def test_scaling_paired_check():
+    result = unittest.TextTestRunner(verbosity=0).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(ScalingPairedCheckTests)
+    )
+    assert result.wasSuccessful(), result.failures + result.errors
+
+
 if __name__ == '__main__':
     unittest.main()

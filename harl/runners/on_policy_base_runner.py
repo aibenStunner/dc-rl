@@ -1037,6 +1037,7 @@ class OnPolicyBaseRunner:
     def _run_fixed_month_validation(self):
         """Validate and retain objective-ranked complete-month candidates."""
         self.validation_event += 1
+        self._save_last_snapshot()
         validation_dir = Path(self.save_dir) / "candidates"
         report = validate_fixed_months(
             env_args=self.env_args,
@@ -1097,6 +1098,28 @@ class OnPolicyBaseRunner:
         }
         (validation_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False))
         return retained
+
+    def _save_last_snapshot(self):
+        """Keep the weights under validation, whatever the validation outcome.
+
+        Written before validation runs, so an ineligible result or a validator
+        failure never leaves the run without saved weights. This is not a
+        selected model; selected weights are exported to the parent directory.
+        """
+        last_dir = Path(self.save_dir) / "last"
+        partial_dir = Path(self.save_dir) / "last.partial"
+        if partial_dir.exists():
+            shutil.rmtree(partial_dir)
+        partial_dir.mkdir(parents=True)
+        self._save_checkpoint_directory(partial_dir)
+        (partial_dir / "last.json").write_text(json.dumps({
+            "validation_event": self.validation_event,
+            "note": "weights evaluated at this validation event, saved before "
+                    "validation and kept regardless of eligibility; not a selected model",
+        }, indent=2))
+        if last_dir.exists():
+            shutil.rmtree(last_dir)
+        partial_dir.rename(last_dir)
 
     def _save_checkpoint_directory(self, directory):
         for agent_id in range(self.num_agents):

@@ -80,6 +80,72 @@ def test_ineligible_validation_evidence_is_retained_without_checkpoint():
         assert json.loads((candidates / "manifest.json").read_text())["candidates"][0]["eligible"] is False
 
 
+def _validation_runner(save_dir):
+    from types import SimpleNamespace
+    from harl.runners.on_policy_base_runner import OnPolicyBaseRunner
+
+    runner = object.__new__(OnPolicyBaseRunner)
+    runner.save_dir = str(save_dir)
+    Path(save_dir).mkdir()
+    runner.validation_event = 0
+    runner.fixed_validation = {"seed": 102, "require_zero_overdue_steps": True, "retain_top_k": 5}
+    runner.algo_args = {"seed": {"seed": 1}}
+    runner.env_args = {}
+    runner.recurrent_n = 1
+    runner.rnn_hidden_size = 1
+    runner.num_agents = 3
+    runner.actor = [SimpleNamespace(actor=torch.nn.Linear(1, 1)) for _ in range(3)]
+    runner.critic = SimpleNamespace(critic=torch.nn.Linear(1, 1))
+    runner.value_normalizer = torch.nn.Linear(1, 1)
+    return runner
+
+
+def test_every_validation_event_keeps_its_evaluated_weights_in_last_snapshot():
+    import harl.runners.on_policy_base_runner as runner_module
+
+    def ineligible_report(**kwargs):
+        return _result(event=kwargs["event"], **{"episode/service/overdue_steps": 1.0})
+
+    with tempfile.TemporaryDirectory() as directory:
+        runner = _validation_runner(Path(directory) / "models")
+        last = Path(runner.save_dir) / "last"
+        with patch.object(runner_module, "validate_fixed_months", ineligible_report):
+            runner._run_fixed_month_validation()
+            assert (last / "actor_agent0.pt").is_file(), "ineligible event left no weights on disk"
+            first = torch.load(last / "actor_agent0.pt", weights_only=True)["weight"].clone()
+            with torch.no_grad():
+                runner.actor[0].actor.weight.add_(1.0)
+            runner._run_fixed_month_validation()
+
+        assert sorted(path.name for path in last.iterdir()) == [
+            "actor_agent0.pt", "actor_agent1.pt", "actor_agent2.pt",
+            "critic_agent.pt", "last.json", "value_normalizer.pt",
+        ]
+        assert json.loads((last / "last.json").read_text())["validation_event"] == 2
+        assert torch.equal(torch.load(last / "actor_agent0.pt", weights_only=True)["weight"], first + 1.0)
+        assert not (Path(runner.save_dir) / "last.partial").exists()
+        assert not list(Path(runner.save_dir).glob("*.pt")), "ineligible weights were exported as the winner"
+        assert not list((Path(runner.save_dir) / "candidates" / "event-2").glob("*.pt"))
+
+
+def test_last_snapshot_is_written_before_validation_can_fail():
+    import harl.runners.on_policy_base_runner as runner_module
+
+    def crashing_validator(**kwargs):
+        raise RuntimeError("validator crashed")
+
+    with tempfile.TemporaryDirectory() as directory:
+        runner = _validation_runner(Path(directory) / "models")
+        with patch.object(runner_module, "validate_fixed_months", crashing_validator):
+            try:
+                runner._run_fixed_month_validation()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("validator crash was swallowed")
+        assert (Path(runner.save_dir) / "last" / "actor_agent0.pt").is_file()
+
+
 def test_runner_uses_fixed_validation_instead_of_legacy_checkpoint_selection():
     from harl.runners.on_policy_base_runner import OnPolicyBaseRunner
 
