@@ -164,7 +164,9 @@ class FakeMetricWriter:
         self.metric_rows.append((dict(metrics), global_step))
 
 
-def _logger_with_fake_writer():
+def _logger_with_fake_writer(env_args=None, num_agents=3):
+    if env_args is None:
+        env_args = {"location": "ca", "reward": {"mode": "team_tariff_targeted_safeguards"}}
     return SustainDCLogger(
         {"env": "sustaindc", "algo": "happo", "exp_name": "test"},
         {
@@ -175,8 +177,8 @@ def _logger_with_fake_writer():
             },
             "eval": {"n_eval_rollout_threads": 1},
         },
-        {"location": "ca", "reward": {"mode": "team_tariff_targeted_safeguards"}},
-        3,
+        env_args,
+        num_agents,
         FakeMetricWriter(),
         ".",
     )
@@ -223,6 +225,49 @@ def test_rollout_logging_keeps_targeted_returns_separate():
     assert interval_rows[0]["train/interval/reward/agent_ls/sum"] == -4.0
     assert interval_rows[0]["train/interval/reward/agent_dc/sum"] == -3.0
     assert interval_rows[0]["train/interval/reward/agent_bat/sum"] == -2.0
+
+
+def _complete_one_episode(logger, rewards, infos, actor_infos):
+    """Run one finished episode through the logger and return its scalars by tag."""
+    logger.init(episodes=1)
+    logger.episode_init(1)
+    logger.per_step(_training_data(
+        rewards=np.array(rewards, dtype=np.float32),
+        infos=infos,
+        dones=np.ones((1, len(actor_infos), 1), dtype=bool),
+    ))
+    logger.episode_log(actor_infos, {}, None, FakeCriticBuffer())
+    return {tag: value for tag, value, _ in logger.writter.scalars}
+
+
+def test_battery_only_run_labels_its_logged_series_with_the_battery():
+    logger = _logger_with_fake_writer(
+        {"location": "ca", "agents": ["agent_bat"], "reward": {"mode": "battery_tariff_delta"}},
+        num_agents=1,
+    )
+    logged = _complete_one_episode(
+        logger, [[[-2.0]]], [[_info(agent_bat_reward=-2.0)]], [{"policy_loss": 0.5}])
+
+    assert logged.get("train/update/actor/bat/policy_loss") == 0.5, sorted(logged)
+    assert logged.get("train/episode/reward/agent_bat/return") == -2.0, sorted(logged)
+    wrong = [tag for tag in logged if "/ls/" in tag or "/dc/" in tag
+             or "agent_ls" in tag or "agent_dc" in tag]
+    assert not wrong, wrong
+
+
+def test_three_agent_logged_series_keep_their_labels_with_or_without_an_agents_setting():
+    mode = {"mode": "team_tariff_targeted_safeguards"}
+    for env_args in ({"location": "ca", "reward": mode},
+                     {"location": "ca", "agents": ["agent_ls", "agent_dc", "agent_bat"], "reward": mode}):
+        logger = _logger_with_fake_writer(env_args)
+        logged = _complete_one_episode(
+            logger, [[[-4.0], [-3.0], [-2.0]]], [[_info()] * 3],
+            [{"policy_loss": 1.0}, {"policy_loss": 2.0}, {"policy_loss": 3.0}])
+
+        assert [logged[f"train/update/actor/{name}/policy_loss"] for name in ("ls", "dc", "bat")] == [1.0, 2.0, 3.0]
+        assert [logged[f"train/episode/reward/{name}/return"]
+                for name in ("agent_ls", "agent_dc", "agent_bat")] == [-4.0, -3.0, -2.0]
+        assert logged["train/episode/reward/mean_across_agents/return"] == -3.0
 
 
 def test_episode_metrics_are_retained_for_every_episode_not_only_logged_ones():
@@ -337,6 +382,52 @@ def test_trace_row_retains_billing_and_next_state_clocks():
     assert row["action/dc"] == 2
     assert row["action/bat"] == 0
     assert row["terminal"] is True
+
+
+def test_trace_row_for_a_battery_only_run_carries_only_the_battery_action():
+    row = build_trace_row(
+        info=_info(),
+        actions=[2],
+        run_metadata={},
+        terminal=False,
+        truncated=False,
+        agents=["agent_bat"],
+    )
+    assert row["action/bat"] == 2
+    assert [key for key in row if key.startswith("action/")] == ["action/bat"]
+
+
+def test_trace_row_agents_default_to_the_three_shipped_agents():
+    arguments = dict(
+        info=_info(),
+        actions=np.array([[1], [2], [0]]),
+        run_metadata={"step": 4},
+        terminal=False,
+        truncated=False,
+    )
+    default = build_trace_row(**arguments)
+    explicit = build_trace_row(**arguments, agents=("agent_ls", "agent_dc", "agent_bat"))
+    assert list(default.items()) == list(explicit.items())
+    assert [key for key in default if key.startswith("action/")] == [
+        "action/ls", "action/dc", "action/bat",
+    ]
+    assert (default["action/ls"], default["action/dc"], default["action/bat"]) == (1, 2, 0)
+
+
+def test_trace_row_rejects_actions_that_do_not_match_the_agents():
+    for agents, actions in (
+        (["agent_bat"], [1, 1, 2]),
+        (["agent_ls", "agent_dc", "agent_bat"], [2]),
+    ):
+        try:
+            build_trace_row(
+                info=_info(), actions=actions, run_metadata={},
+                terminal=False, truncated=False, agents=agents,
+            )
+        except ValueError as exc:
+            assert all(name in str(exc) for name in agents), str(exc)
+        else:
+            raise AssertionError(f"{len(actions)} actions for {agents} must fail")
 
 
 def test_trace_csv_retains_optional_columns_and_float_precision():

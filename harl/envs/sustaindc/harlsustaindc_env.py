@@ -64,7 +64,13 @@ class HARLSustainDCEnv:
             tuple: Shared observation array.
         """
         states = tuple(o for o in obs)
-        if self.env_args.get('nonoverlapping_shared_obs_space', False):
+        nonoverlapping = self.env_args.get('nonoverlapping_shared_obs_space', False)
+        if nonoverlapping and list(self.agents) == ['agent_bat']:
+            # Battery-only critic: the battery observation is the facility state
+            # (the block below picks features out of a load-shifting and a cooling
+            # state that do not exist with one agent).
+            states = np.asarray(states[0], dtype=np.float32)
+        elif nonoverlapping:
             concat_states = []
             infos = self.env.unwrapped.env.infos
 
@@ -190,8 +196,23 @@ class HARLSustainDCEnv:
         self._seed = seed
 
     def close(self):
-        """Close the environment."""
-        pass
+        """Close the environment and let it be freed.
+
+        SuperSuit's padding wrappers memoize ``observation_space`` and
+        ``action_space`` with an unbounded ``functools.lru_cache`` on the class,
+        keyed on the wrapper instance, so the cache keeps every wrapper, and the
+        simulator under it, alive for the life of the process. Clearing those
+        caches releases this environment; any other open environment recomputes
+        the same spaces on its next call.
+        """
+        wrapper, base = self.env, self.env.unwrapped
+        while wrapper is not None and wrapper is not base:
+            for name in ("observation_space", "action_space"):
+                cache_clear = getattr(getattr(type(wrapper), name, None), "cache_clear", None)
+                if cache_clear is not None:
+                    cache_clear()
+            links = vars(wrapper)
+            wrapper = links.get("env", links.get("aec_env"))
 
     def wrap(self, l):
         """

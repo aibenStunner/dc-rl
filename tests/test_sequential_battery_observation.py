@@ -119,7 +119,7 @@ def test_begin_step_reports_the_current_interval_gross_load():
         peak = env.price_m.state.running_peak_kw
         soc = env.bat_env.get_battery_soc()
         mid = env.begin_step(_ls_dc(actions))
-        assert mid.shape == before.shape == (29,) and mid.dtype == np.float32
+        assert mid.shape == before.shape == (30,) and mid.dtype == np.float32
         assert mid is not env.bat_state
         changed = set(np.flatnonzero(mid != before).tolist())
         assert changed <= {GROSS}, changed
@@ -413,6 +413,39 @@ def test_collect_previous_timing_does_not_call_begin_step():
     assert np.all(log[2][2] == 0.0)
 
 
+def test_collect_with_the_battery_as_the_only_agent_begins_the_step_with_no_earlier_actions():
+    from harl.runners.on_policy_base_runner import OnPolicyBaseRunner
+
+    log, threads, steps = [], 2, 3
+    runner = object.__new__(OnPolicyBaseRunner)
+    runner.num_agents = 1
+    runner.actor = [_CollectActor(0, 2, log)]
+    runner.actor_buffer = [SimpleNamespace(
+        obs=np.zeros((steps + 1, threads, 40), dtype=np.float32),
+        rnn_states=np.zeros((steps + 1, threads, 1, 4), dtype=np.float32),
+        masks=np.ones((steps + 1, threads, 1), dtype=np.float32),
+        available_actions=None)]
+    runner.critic = _Critic()
+    runner.critic_buffer = SimpleNamespace(
+        share_obs=np.zeros((steps + 1, threads, 5), dtype=np.float32),
+        rnn_states_critic=np.zeros((steps + 1, threads, 1, 4), dtype=np.float32),
+        masks=np.ones((steps + 1, threads, 1), dtype=np.float32))
+    runner.state_type = 'EP'
+    runner.algo_args = {'train': {'n_rollout_threads': threads}}
+    runner.envs = _BeginVecEnv(log)
+    runner.sequential_battery_index = 0
+    _, actions, _, _, _ = runner.collect(1)
+    assert [entry[0] for entry in log] == ['begin', 'act']
+    # One row per rollout thread, each holding zero earlier-agent actions. The
+    # vector environment forwards one row to each worker, so a leading dimension
+    # other than the thread count would leave workers unanswered.
+    assert log[0][1].shape == (threads, 0, 1), log[0][1].shape
+    assert np.all(log[1][2] == 7.0)
+    assert np.all(runner.actor_buffer[0].obs[1] == 7.0)
+    assert np.all(runner.actor_buffer[0].obs[0] == 0.0)
+    assert np.array_equal(actions[:, :, 0], np.array([[2], [2]]))
+
+
 class _EvalActor:
     def __init__(self, agent_id, action, log):
         self.agent_id, self.action, self.log = agent_id, action, log
@@ -517,13 +550,13 @@ class _RecordingActor:
         return torch.tensor([[self.action]]), torch.as_tensor(state)
 
 
-def _fixed_month_env(log):
+def _fixed_month_env(log, n_agents=3):
     class FakeEnv:
         def __init__(self, env_args):
             self.steps = 0
 
         def reset(self, *, seed, options):
-            return [np.zeros(4, dtype=np.float32)] * 3, None, [np.ones(3)] * 3
+            return [np.zeros(4, dtype=np.float32)] * n_agents, None, [np.ones(3)] * n_agents
 
         def begin_step(self, actions):
             log.append(('begin', np.asarray(actions).tolist()))
@@ -535,8 +568,8 @@ def _fixed_month_env(log):
             done = self.steps == 2
             info = {'bat_grid_import_kwh': 0.0, 'bat_terminal_soc_restore_grid_kwh': 0.0,
                     '_harl_terminated': False, '_harl_truncated': done}
-            return ([np.zeros(4, dtype=np.float32)] * 3, None, [[0.0]] * 3, [done] * 3,
-                    [info] * 3, [np.ones(3)] * 3)
+            return ([np.zeros(4, dtype=np.float32)] * n_agents, None, [[0.0]] * n_agents,
+                    [done] * n_agents, [info] * n_agents, [np.ones(3)] * n_agents)
 
         def close(self):
             pass
@@ -562,6 +595,51 @@ def test_fixed_month_validation_feeds_the_battery_the_mid_step_observation():
             assert log == [('step', [1, 0, 2])] * 2
             assert all(np.all(seen == 0.0) for seen in actors[2].seen)
         assert all(np.all(seen == 0.0) for seen in actors[0].seen + actors[1].seen)
+
+
+def test_fixed_month_validation_with_the_battery_as_the_only_agent_records_only_its_action():
+    import csv
+    import tempfile
+
+    import harl.envs.sustaindc.fixed_month_validation as fixed_validation
+
+    log = []
+    actors = [_RecordingActor(2)]
+    env_args = {'agents': ['agent_bat'], 'battery': {'observation_timing': 'current'}}
+    with tempfile.TemporaryDirectory() as directory, \
+         patch.object(fixed_validation, 'HARLSustainDCEnv', _fixed_month_env(log, n_agents=1)), \
+         patch.object(fixed_validation, 'month_steps', return_value=2):
+        fixed_validation.validate_fixed_months(
+            env_args=env_args, actors=actors, recurrent_n=1, rnn_hidden_size=1,
+            seed=102, event=1, output_dir=Path(directory),
+            cases=(fixed_validation.ValidationCase('test', 0),))
+        with open(Path(directory) / 'event-1-test.csv', newline='') as handle:
+            rows = list(csv.DictReader(handle))
+    assert log == [('begin', []), ('step', [2])] * 2
+    assert len(rows) == 2
+    assert [name for name in rows[0] if name.startswith('action/')] == ['action/bat']
+    assert [row['action/bat'] for row in rows] == ['2', '2']
+
+
+def test_fixed_month_validation_labels_each_agents_action_with_the_agent_that_chose_it():
+    import csv
+    import tempfile
+
+    import harl.envs.sustaindc.fixed_month_validation as fixed_validation
+
+    for env_args in ({}, {'battery': {'observation_timing': 'current'}}):
+        actors = [_RecordingActor(1), _RecordingActor(0), _RecordingActor(2)]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(fixed_validation, 'HARLSustainDCEnv', _fixed_month_env([])), \
+             patch.object(fixed_validation, 'month_steps', return_value=2):
+            fixed_validation.validate_fixed_months(
+                env_args=env_args, actors=actors, recurrent_n=1, rnn_hidden_size=1,
+                seed=102, event=1, output_dir=Path(directory),
+                cases=(fixed_validation.ValidationCase('test', 0),))
+            with open(Path(directory) / 'event-1-test.csv', newline='') as handle:
+                rows = list(csv.DictReader(handle))
+        assert len(rows) == 2
+        assert [(row['action/ls'], row['action/dc'], row['action/bat']) for row in rows] == [('1', '0', '2')] * 2
 
 
 def test_choose_actions_calls_begin_step_before_the_battery_actor():

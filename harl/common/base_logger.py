@@ -27,6 +27,15 @@ class BaseLogger:
         """Get the task name."""
         raise NotImplementedError
 
+    def _agent_names(self):
+        """Return the agents' names in actor order, for labeling logged series.
+
+        The environment configuration's ``agents`` list names them, so a run
+        with fewer agents labels each series with the agent that produced it.
+        A configuration that does not name its agents runs the shipped three.
+        """
+        return tuple(self.env_args.get("agents") or ("agent_ls", "agent_dc", "agent_bat"))
+
     def init(self, episodes):
         """Initialize the logger."""
         self.start = time.time()
@@ -98,11 +107,12 @@ class BaseLogger:
 
         critic_train_info["average_step_rewards"] = critic_buffer.get_mean_rewards()
         self.log_train(actor_train_infos, critic_train_info)
-        agent_names = ("ls", "dc", "bat")
+        agent_names = self._agent_names()
         for agent_id in range(self.num_agents):
+            actor_name = agent_names[agent_id].removeprefix("agent_")
             for key, value in actor_train_infos[agent_id].items():
                 self.writter.add_scalar(
-                    f"train/update/actor/{agent_names[agent_id]}/{key}",
+                    f"train/update/actor/{actor_name}/{key}",
                     value,
                     self.total_num_steps,
                 )
@@ -128,7 +138,7 @@ class BaseLogger:
                 )
             )
             self.writter.add_scalar("train/average_step_rewards", aver_episode_rewards, self.total_num_steps)
-            agent_names = ("agent_ls", "agent_dc", "agent_bat")
+            agent_names = self._agent_names()
             completed_returns = np.asarray(self.done_agent_episode_rewards)
             for agent_id in range(min(self.num_agents, len(agent_names))):
                 self.writter.add_scalar(

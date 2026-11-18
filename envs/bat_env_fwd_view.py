@@ -23,9 +23,9 @@ class BatteryEnvFwd(gym.Env):
         self.discharge_mode = _validate_discharge_mode(
             env_config.get('discharge_mode', 'fixed_rate')
         )
-        observation_high = np.ones(29, dtype=np.float32)
+        observation_high = np.ones(30, dtype=np.float32)
         observation_high[15:17] = 10.0
-        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(29)),
+        self.observation_space = spaces.Box(low=np.float32(-1.0 * np.ones(30)),
                                             high=observation_high)
         self.max_dc_pw_MW = env_config['max_dc_pw_MW']
         self.action_space = spaces.Discrete(3)

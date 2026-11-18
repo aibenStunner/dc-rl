@@ -284,9 +284,9 @@ and on the command line:
     --wandb-tags <tag1> <tag2> \
 ```
 
-**Never pass bare `--mode` or `--enabled`.** Those leaf names exist in
-both the algo and env configs and would also overwrite the Experiment 1
-reward mode and the PV flag respectively (see Section 5.7).
+**Bare `--mode`, `--enabled` and `--seed` are refused.** Those leaf names exist in
+more than one section, so the launch stops with a list of full paths
+to choose from (see Section 5.7).
 
 Full example:
 
@@ -590,8 +590,8 @@ rsync -a --exclude='results' --exclude='__pycache__' \
 cd "$WORKDIR"
 
 # ---------------------------------------------------------------------------
-# The generic CLI override reaches nested config values by LEAF NAME, so
-# --seed, --torch_threads and --failure_policy all work. Verify what
+# Each override must name exactly one setting (Section 5.7), so the seed
+# is --seed.seed; --torch_threads and --failure_policy are unique. Verify what
 # actually took effect by echoing the resolved config.
 # ---------------------------------------------------------------------------
 python3 - <<'PY'
@@ -635,7 +635,7 @@ srun --ntasks=1 --cpus-per-task="$CPUS" --cpu-bind=cores \
     --env sustaindc \
     --exp_name "$RUN_NAME" \
     --seed_specify True \
-    --seed 101 \
+    --seed.seed 101 \
     --cuda True \
     --torch_threads 1 \
     --n_rollout_threads "$N_ROLLOUT_THREADS" \
@@ -825,7 +825,7 @@ srun --ntasks=1 --cpus-per-task="$SLURM_CPUS_PER_TASK" --cpu-bind=cores \
     --env sustaindc \
     --exp_name "happo-${CAPACITY_MW}mw-seed${SEED}" \
     --seed_specify True \
-    --seed "$SEED" \
+    --seed.seed "$SEED" \
     --cuda True \
     --torch_threads 1 \
     --datacenter_capacity_mw "$CAPACITY_MW" \
@@ -917,7 +917,7 @@ srun --ntasks=1 --cpus-per-task="$SLURM_CPUS_PER_TASK" --cpu-bind=cores \
     --env sustaindc \
     --exp_name "${ALGO}-${CAPACITY_MW}mw-seed${SEED}" \
     --seed_specify True \
-    --seed "$SEED" \
+    --seed.seed "$SEED" \
     --cuda True \
     --torch_threads 1 \
     --datacenter_capacity_mw "$CAPACITY_MW" \
@@ -937,26 +937,24 @@ srun --ntasks=1 --cpus-per-task="$SLURM_CPUS_PER_TASK" --cpu-bind=cores \
 
 ### 5.7 How CLI config overrides actually resolve
 
-`train_sustaindc.py` accepts ad-hoc `--key value` overrides. The merge
-walker in [harl/utils/configs_tools.py](harl/utils/configs_tools.py)
-recurses into nested dicts and matches a CLI key against a config leaf
-**by name, anywhere in the tree**:
+`train_sustaindc.py` accepts ad-hoc `--key value` overrides.
+`update_args` in [harl/utils/configs_tools.py](harl/utils/configs_tools.py)
+requires each key to name **exactly one** setting. A bare leaf name works
+when only one setting carries it. Otherwise pass a dotted path whose
+trailing components are unique, such as `--seed.seed 101`. A key that
+matches no setting, or several, stops the launch with a `ValueError`
+listing the candidate paths, and nothing is overwritten.
 
-```python
-def update_dict(dict1, dict2):
-    for k in dict2:
-        if type(dict2[k]) is dict:
-            update_dict(dict1, dict2[k])      # recurses into nested dicts
-        else:
-            if k in dict1:
-                dict2[k] = dict1[k]           # only if the LEAF NAME exists
-```
-
-Verified by running the resolver directly against the real config:
+Until 2026-11-17 the resolver overwrote **every** leaf with a matching
+name, and ignored unknown keys silently. A bare `--seed 1` therefore also
+moved `eval.fixed_month_validation.seed` from 102 to 1. That is how the
+2026-11-16 Alienware run validated on the wrong scenario seed.
 
 | Override | Resolves to | Effect |
 |---|---|---|
-| `--seed 101` | `algo.seed.seed` | works |
+| `--seed 101` | `algo.seed.seed` **and** `algo.eval.fixed_month_validation.seed` | refused: ambiguous |
+| `--seed.seed 101` | `algo.seed.seed` | works |
+| `--fixed_month_validation.seed 102` | `algo.eval.fixed_month_validation.seed` | works |
 | `--seed_specify True` | `algo.seed.seed_specify` | works |
 | `--torch_threads 1` | `algo.device.torch_threads` | works |
 | `--cuda True` | `algo.device.cuda` | works |
@@ -968,29 +966,18 @@ Verified by running the resolver directly against the real config:
 | `--failure_policy error` | `algo.logger.wandb.failure_policy` | works |
 | `--datacenter_capacity_mw 10` | `env.datacenter_capacity_mw` | works (top-level env key) |
 
-Two rules follow:
+Three bare names are shared and are now refused:
 
-**Dotted names do not work.** `--seed.seed 101` produces the key
-`seed.seed`, which matches no leaf, so it is silently ignored. Always use
-the bare leaf name.
+| Leaf name | Matches |
+|---|---|
+| `seed` | `seed.seed`, `eval.fixed_month_validation.seed` |
+| `mode` | `logger.wandb.mode`, `facility_sizing.mode`, `reward.mode` |
+| `enabled` | `eval.fixed_month_validation.enabled`, `logger.wandb.enabled`, `pv.enabled` |
 
-**Two leaf names collide between the algo and env configs.** A bare
-`--mode` or `--enabled` sets *both* matches:
-
-| Leaf name | Matches | Danger |
-|---|---|---|
-| `mode` | `logger.wandb.mode` **and** `reward.mode` | `--mode online` would also overwrite the Experiment 1 reward mode |
-| `enabled` | `logger.wandb.enabled` **and** `pv.enabled` | `--enabled True` would also switch PV on |
-
-Never pass bare `--mode` or `--enabled`. Use `--wandb-mode` and
-`--wandb-project` instead, which are handled by `apply_wandb_overrides`
-([train_sustaindc.py:149-150](train_sustaindc.py#L149)) and therefore run
-*after* the generic merge and win over the YAML.
-
-Because the resolver matches by name, an override that "does nothing" is
-almost always a typo or a colliding name — not a nesting problem. To
-confirm what actually took effect, run the resolver the same way the
-script does (see the verification block in Section 5.3).
+For W&B use `--wandb-mode` and `--wandb-project`. Those are handled by
+`apply_wandb_overrides` in `train_sustaindc.py`, which runs after the
+generic merge. For the protocol's battery-only runs, use the launch JSON
+route in the 2026-11-12 amendment (A3) and pass no seed flag at all.
 
 ---
 

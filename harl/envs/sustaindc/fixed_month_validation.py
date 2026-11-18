@@ -20,6 +20,7 @@ import torch
 from harl.envs.sustaindc.harlsustaindc_env import HARLSustainDCEnv
 from harl.envs.sustaindc.metrics import FacilityMetricAccumulator, build_trace_row, write_trace_csv
 from harl.envs.sustaindc.sequential import sequential_battery_index
+from sustaindc_env import EnvConfig
 from utils.managers.pricing.models.hydro_quebec import _MONTH_START_DAYS
 
 
@@ -119,6 +120,7 @@ def validate_fixed_months(
 def _validate_case(*, env_args, actors, recurrent_n, rnn_hidden_size, seed, event, case, output_dir):
     expected_steps = month_steps(case.init_day)
     battery_index = sequential_battery_index(env_args)
+    agents = list(EnvConfig(env_args)["agents"])  # the simulator's agent order, which is the actors' order
     env = HARLSustainDCEnv(dict(env_args, episode_start_policy="calendar_month"))
     try:
         observations, _, available_actions = env.reset(seed=seed, options={"init_day": case.init_day, "init_hour": 0})
@@ -152,7 +154,7 @@ def _validate_case(*, env_args, actors, recurrent_n, rnn_hidden_size, seed, even
                     f"validation case {case.name} terminated at step {step + 1}"
                 )
             metrics.add(values)
-            rows.append(build_trace_row(info=values, actions=actions, run_metadata={"event": event, "case": case.name, "start_day": case.init_day, "seed": seed, "step": step}, terminal=False, truncated=episode_done))
+            rows.append(build_trace_row(info=values, actions=actions, run_metadata={"event": event, "case": case.name, "start_day": case.init_day, "seed": seed, "step": step}, terminal=False, truncated=episode_done, agents=agents))
             if episode_done:
                 if step != expected_steps - 1 or not np.all(truncated_flags):
                     raise RuntimeError(f"validation case {case.name} ended unexpectedly at step {step + 1}")

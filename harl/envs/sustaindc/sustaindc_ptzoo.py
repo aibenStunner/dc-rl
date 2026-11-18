@@ -26,7 +26,19 @@ class SustainDCPettingZooEnv(ParallelEnv):
         self.observation_spaces = {agent: space for agent, space in zip(self.possible_agents, self.env.observation_space)}
         self.action_spaces = {agent: space for agent, space in zip(self.possible_agents, self.env.action_space)}
         
-        if env_config['nonoverlapping_shared_obs_space']:
+        if env_config['nonoverlapping_shared_obs_space'] and list(self.possible_agents) == ['agent_bat']:
+            # A battery-only critic sees the battery observation itself: the block
+            # below indexes a load-shifting and a cooling state that do not exist
+            # with one agent. Under FP the critic input gains the one-hot identity
+            # slot that harlsustaindc_env.fp_critic_observations appends.
+            battery_space = self.observation_spaces['agent_bat']
+            identity_slots = 1 if env_config.get("state_type", "EP") == "FP" else 0
+            self.share_observation_space = {'agent_bat': spaces.Box(
+                low=np.concatenate([battery_space.low, np.zeros(identity_slots)]).astype(np.float32),
+                high=np.concatenate([battery_space.high, np.ones(identity_slots)]).astype(np.float32),
+                dtype=np.float32,
+            )}
+        elif env_config['nonoverlapping_shared_obs_space']:
             # The shared obs is built in harlsustaindc_env._create_shared_observation
             # as: the whole ls_state, + 3 dc_state features not already in it
             # (next_workload, next_exterior_temp, setpoint), + 3 bat_state features

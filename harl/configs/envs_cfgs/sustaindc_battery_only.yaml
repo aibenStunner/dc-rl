@@ -1,0 +1,117 @@
+# Battery-only training scenario. The battery is the only learner; the
+# do-nothing base agents in utils/base_agents.py hold workload shifting and
+# cooling at their noop actions, so the facility load does not depend on
+# battery actions. Same settings as sustaindc.yaml except for this agents
+# list, the discharge floor and the reward (checked by
+# tests/test_battery_only_config.py).
+agents:
+  - agent_bat
+# Montréal–Trudeau TMYx built from 2011–2025 NCEI ISD / ERA5 data.
+# `location: montreal` selects this EPW; the explicit carbon file selects
+# Electricity Maps Québec direct operational carbon intensity.
+location: montreal
+cintensity_file: "QC_NG_&_avgCI.csv"
+# Keep temperature, wind, and irradiance on the same unperturbed EPW timeline
+# while PV is active. Turn on only for a separate weather-randomization study.
+weather:
+  randomize: false
+# Roof-constrained fixed-tilt on-site PV. PV AC serves the facility bus first;
+# surplus is measured and curtailed, with no export-credit assumption.
+pv:
+  enabled: true
+  capacity_fraction_of_datacenter: 0.05
+  surface_tilt_deg: 35.0
+  surface_azimuth_deg: 180.0
+  dc_ac_ratio: 1.20
+  gamma_pdc_per_deg_c: -0.0037
+  system_losses_fraction: 0.1408
+  inverter_efficiency: 0.96
+  temperature_model: close_mount_glass_glass
+  export_policy: curtail
+workload_file: "Alibaba_CPU_Data_Hourly_1.csv"
+# scaling sizes the modelled hardware so that full-utilization facility
+# demand matches datacenter_capacity_mw at the design conditions recorded in
+# dc_env.sizing_metadata. It is a design rating, not a cap on every episode.
+# legacy reproduces the earlier fixed 20-rack sizing exactly.
+facility_sizing:
+  mode: scaling
+# Legacy observation range only; not the scaling BESS power rating.
+max_bat_cap_Mw: 1.0
+# Dispatchable BESS, not UPS backup: bus-side rated power is a fraction of
+# the facility rating and nominal cell energy is rated MW * duration hours.
+battery:
+  power_fraction: 1.0
+  duration_hours: 2.0
+  round_trip_efficiency: 0.90
+  degradation_cost_c_per_kwh: 5.78
+  initial_soc: 0.5
+  # Keep charging from establishing a new billing peak; PV surplus remains usable.
+  peak_charge_headroom: true
+  # running_peak: charging may lift grid import up to the billing running peak.
+  # tariff: up to the pricing model's charge_import_limit_kw; on winter Rate L
+  # that is also the daily 110% contract-power threshold until the month's
+  # optimization charge reaches its cap.
+  peak_charge_headroom_basis: tariff
+  # fixed_rate: a discharge action delivers the SOC rate curve (capped by load).
+  # peak_limit: a discharge action delivers only net import (load - PV) above
+  # the pre-step billing running peak, capped by the same curve. The running
+  # peak starts each month at the demand floor (0 kW on Rate M, 5000 kW on
+  # Rate L), so arming while it is low drains the battery like fixed_rate.
+  discharge_mode: peak_limit
+  # null: no hand-tuned discharge floor. The discharge target is the billing
+  # running peak alone, and when to arm is left to the policy.
+  discharge_peak_floor_kw: null
+  # current: the battery decides after an EMS meter reading of this interval's
+  # facility load, taken once workload and cooling have acted and before
+  # battery dispatch. previous: it sees only the previous interval's load.
+  # Saved checkpoint configs without this key load as previous.
+  observation_timing: current
+# Same as sustaindc.yaml. FP gives the critic one input and one reward column
+# per agent; here the battery is the only agent.
+state_type: FP
+flexible_load: 0.6
+# Each independent episode is one complete calendar month in a non-leap year.
+# Random month starts do not preserve previous months' billing history.
+episode_start_policy: calendar_month
+# battery_tariff_delta: each step the battery earns the scaled bill saving
+# against the same facility load with the battery idle (counterfactual minus
+# actual charges), minus the weighted, scaled degradation cost; the scaled cost
+# of refilling the battery to its starting charge is charged once, at episode
+# end. Summed over an episode it equals the scaled refill-adjusted bill saving
+# minus the weighted, scaled degradation cost (tests/test_battery_only_reward.py).
+# It requires agents == [agent_bat] and a valid_midnight or calendar_month
+# start, and accepts only these three keys.
+reward:
+  mode: battery_tariff_delta
+  scale: 0.01
+  degradation_cost_weight: 1.0
+
+# Capacity (MW) of the datacenter -- also drives Hydro-Quebec tariff
+# auto-selection (Rate M below 5,000 kW / 5 MW, Rate L at/above).
+datacenter_capacity_mw: 10
+
+pricing:
+  model: hydro_quebec
+  config_file: data/Pricing/hydro_quebec_2026.yaml
+  options:
+    tariff: auto
+    demand_floor_kw: 0.0
+
+# Sample each episode's start day from the whole year rather than a +/-7 day
+# window around `month`. Must be True for the Hydro-Quebec winter period to
+# be reached at all -- with month: 6 every episode sits in July.
+sample_whole_year: True
+dc_config_file: "dc_config.json"
+month: 6
+days_per_episode: 30
+partial_obs: True
+nonoverlapping_shared_obs_space: True
+
+# Console verbosity for the training log:
+#   "off"     -- no per-episode facility summary
+#   "summary" -- curated headline metrics per episode (default)
+#   "full"    -- curated summary plus the legacy per-episode averages
+# This only affects console output. The full metric set is always written to
+# W&B and TensorBoard under the train/episode/* and train/interval/*
+# namespaces regardless of this setting.
+console_verbosity: summary

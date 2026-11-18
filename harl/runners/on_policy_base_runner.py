@@ -393,10 +393,15 @@ class OnPolicyBaseRunner:
         for agent_id in range(self.num_agents):
             if agent_id == battery_index:
                 # Store the decision observation so training replays what the
-                # battery policy actually conditioned on.
-                self.actor_buffer[agent_id].obs[step] = self.envs.begin_step(
-                    np.array(action_collector).transpose(1, 0, 2)
-                )
+                # battery policy actually conditioned on. With the battery as the
+                # only agent no one has acted yet: each thread gets an empty row.
+                if action_collector:
+                    earlier_actions = np.array(action_collector).transpose(1, 0, 2)
+                else:
+                    earlier_actions = np.zeros(
+                        (self.algo_args["train"]["n_rollout_threads"], 0, 1), dtype=np.int64
+                    )
+                self.actor_buffer[agent_id].obs[step] = self.envs.begin_step(earlier_actions)
             action, action_log_prob, rnn_state = self.actor[agent_id].get_actions(
                 self.actor_buffer[agent_id].obs[step],
                 self.actor_buffer[agent_id].rnn_states[step],

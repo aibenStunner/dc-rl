@@ -26,23 +26,42 @@ def get_defaults_yaml_args(algo, env):
     return algo_args, env_args
 
 
+def _leaf_paths(node, prefix=()):
+    """Yield ``(path, parent)`` for every non-dict entry under ``node``."""
+    for name, value in node.items():
+        if type(value) is dict:
+            yield from _leaf_paths(value, prefix + (name,))
+        else:
+            yield prefix + (name,), node
+
+
 def update_args(unparsed_dict, *args):
     """Update loaded config with unparsed command-line arguments.
+
+    Each key names exactly one setting: a bare name when only one setting has
+    it, otherwise a dotted path whose trailing components are unique (for
+    example ``seed.seed`` or ``fixed_month_validation.seed``). A key that
+    matches no setting, or several, raises ``ValueError`` before anything is
+    written, so a typo or a shared name never changes the wrong setting.
+
     Args:
         unparsed_dict: (dict) Unparsed command-line arguments.
         *args: (list[dict]) argument dicts to be updated.
     """
-
-    def update_dict(dict1, dict2):
-        for k in dict2:
-            if type(dict2[k]) is dict:
-                update_dict(dict1, dict2[k])
-            else:
-                if k in dict1:
-                    dict2[k] = dict1[k]
-
-    for args_dict in args:
-        update_dict(unparsed_dict, args_dict)
+    leaves = [(path, parent) for args_dict in args for path, parent in _leaf_paths(args_dict)]
+    targets = []
+    for key, value in unparsed_dict.items():
+        parts = tuple(key.split("."))
+        matches = [(path, parent) for path, parent in leaves if path[-len(parts):] == parts]
+        if not matches:
+            raise ValueError(f"--{key} matches no setting in the loaded configuration")
+        if len(matches) > 1:
+            names = ", ".join("--" + ".".join(path) for path, _ in matches)
+            raise ValueError(f"--{key} matches several settings ({names}); pass one of these paths instead")
+        path, parent = matches[0]
+        targets.append((parent, path[-1], value))
+    for parent, name, value in targets:
+        parent[name] = value
 
 
 def get_task_name(env, env_args):

@@ -251,6 +251,64 @@ def team_tariff_targeted_safeguards(
     return rewards, components
 
 
+def battery_tariff_delta(
+    params: dict, reward_config: dict
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Battery-only reward against the facility's no-battery bill.
+
+    The battery earns the scaled bill saving against the bill the same
+    facility load would pay with the battery idle, minus its weighted,
+    scaled degradation cost and the scaled cost of refilling it to its
+    starting charge (non-zero only at episode end). Summed over an episode,
+    this equals the scaled refill-adjusted bill saving minus the weighted,
+    scaled degradation cost. Workload and cooling are fixed rules in this
+    mode and earn no reward.
+    """
+    required_params = (
+        "total_price_cost_this_step_c",
+        "counterfactual_cost_this_step_c",
+        "bat_degradation_cost_c",
+        "bat_terminal_soc_penalty_component",
+    )
+    values = {
+        key: _finite_nonnegative(params[key], key)
+        for key in required_params
+    }
+    config = {
+        key: _finite_nonnegative(reward_config[key], f"reward.{key}")
+        for key in ("scale", "degradation_cost_weight")
+    }
+    if config["scale"] == 0.0:
+        raise ValueError("reward.scale must be positive")
+
+    bill_delta_c = (
+        values["total_price_cost_this_step_c"]
+        - values["counterfactual_cost_this_step_c"]
+    )
+    tariff_delta_reward = -config["scale"] * bill_delta_c
+    degradation_penalty = (
+        config["degradation_cost_weight"]
+        * config["scale"]
+        * values["bat_degradation_cost_c"]
+    )
+    terminal_soc_penalty = values["bat_terminal_soc_penalty_component"]
+
+    components = {
+        "bat_bill_delta_c": bill_delta_c,
+        "bat_tariff_delta_reward_component": tariff_delta_reward,
+        "bat_degradation_penalty_component": degradation_penalty,
+        "bat_terminal_soc_penalty_component": terminal_soc_penalty,
+    }
+    rewards = {
+        "agent_ls": 0.0,
+        "agent_dc": 0.0,
+        "agent_bat": (
+            tariff_delta_reward - degradation_penalty - terminal_soc_penalty
+        ),
+    }
+    return rewards, components
+
+
 def _finite_nonnegative(value: float, name: str) -> float:
     if isinstance(value, bool) or not np.isfinite(float(value)) or float(value) < 0.0:
         raise ValueError(f"{name} must be finite and non-negative")

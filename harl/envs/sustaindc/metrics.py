@@ -441,8 +441,14 @@ def _trace_value(value):
     return value
 
 
-def build_trace_row(*, info, actions, run_metadata, terminal, truncated):
-    """Build one lossless facility trace record from merged SustainDC info."""
+def build_trace_row(*, info, actions, run_metadata, terminal, truncated,
+                    agents=("agent_ls", "agent_dc", "agent_bat")):
+    """Build one lossless facility trace record from merged SustainDC info.
+
+    ``actions`` holds one action for each name in ``agents``, in that order, and
+    the row gets one ``action/<name>`` column per agent: a battery-only run
+    records only ``action/bat``.
+    """
     row = dict(run_metadata)
     for key in ("billed_day", "billed_hour", "next_state_day", "next_state_hour"):
         row[key] = _trace_value(info.get(key))
@@ -450,8 +456,13 @@ def build_trace_row(*, info, actions, run_metadata, terminal, truncated):
         for key in keys:
             if key in info:
                 row[f"{prefix}{key}"] = _trace_value(info[key])
-    action_names = ("ls", "dc", "bat")
-    flattened = np.asarray(actions).reshape(len(action_names), -1)
+    action_names = tuple(name.removeprefix("agent_") for name in agents)
+    values = np.asarray(actions)
+    if values.size != len(action_names):
+        raise ValueError(
+            f"build_trace_row needs one action for each of {list(agents)}, got {values.size}"
+        )
+    flattened = values.reshape(len(action_names), -1)
     for index, name in enumerate(action_names):
         value = flattened[index][0]
         row[f"action/{name}"] = _trace_value(value)

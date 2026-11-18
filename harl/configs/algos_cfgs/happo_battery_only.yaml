@@ -1,0 +1,161 @@
+# HAPPO configuration for the battery-only study (sustaindc_battery_only.yaml).
+# Same settings as happo.yaml except the learning rates and the launch size
+# (checked by tests/test_battery_only_config.py).
+seed:
+  # whether to use the specified seed
+  seed_specify: True
+  # seed
+  seed: 1
+device:
+  # whether to use CUDA
+  cuda: False
+  # whether to set CUDA deterministic
+  cuda_deterministic: False
+  # arg to torch.set_num_threads
+  torch_threads: 4
+train:
+  # number of parallel environments for training data collection
+  n_rollout_threads: 16
+  # 100 updates of 16 * 1024 = 16,384 transitions (6 runs fit the 600-update
+  # budget). Any thread override must keep num_env_steps = 100 * 1024 *
+  # n_rollout_threads (819,200 at 8 threads). Never pass --seed: it also
+  # rewrites eval.fixed_month_validation.seed.
+  num_env_steps: 1638400
+  # number of steps per environment per training data collection
+  episode_length: 1024
+  # logging interval (logs dist_entropy at update 60 for the entropy kill rule)
+  log_interval: 5
+  # Validate at updates 10, 20, ..., 100; eval_interval must divide the update count.
+  eval_interval: 10
+  # render interval
+  render_interval: 5
+  # whether to use ValueNorm
+  use_valuenorm: True
+  # whether to use linear learning rate decay
+  use_linear_lr_decay: False
+  # whether to consider the case of truncation when an episode is done
+  use_proper_time_limits: True
+
+  # if set, load models from this directory; otherwise, randomly initialise the models
+  model_dir: ~
+eval:
+  # whether to use evaluation
+  use_eval: True
+  # number of parallel environments for evaluation
+  n_eval_rollout_threads: 2
+  # number of episodes per evaluation
+  eval_episodes: 1
+  # If dump the evaluation metrics in a csv file
+  dump_eval_metrcs: False
+  # Rank eligible policies on four deterministic, independent full months.
+  # This replaces reward-ranked vector evaluation for checkpoint selection;
+  # these cases were previously used in scenario analysis, not pristine holdouts.
+  # Ending below the starting battery SOC is not a gate (null = no cap): the
+  # energy to refill it is added to the bill before ranking. A number (kWh,
+  # summed over the four months) would also reject candidates above it.
+  fixed_month_validation:
+    enabled: True
+    seed: 102
+    require_zero_queue_overflow: True
+    require_zero_overdue_steps: True
+    require_zero_thermal_clamp_steps: True
+    require_zero_capacity_exceeded_steps: True
+    max_terminal_soc_restore_grid_kwh: null
+    retain_top_k: 5
+
+render:
+  # whether to use render
+  use_render: False
+  # number of episodes to render
+  render_episodes: 1
+  # whether to dump the render metric in a csv file
+  dump_render_metrics: True
+
+model:
+  # network parameters
+  # hidden sizes for mlp module in the network
+  hidden_sizes: [64, 64]
+  # activation function, choose from sigmoid, tanh, relu, leaky_relu, selu
+  activation_func: tanh
+  # whether to use feature normalization
+  use_feature_normalization: True
+  # initialization method for network parameters, choose from xavier_uniform_, orthogonal_, ...
+  initialization_method: xavier_uniform_
+  # gain of the output layer of the network.
+  gain: 0.01
+  # recurrent parameters
+  # whether to use rnn policy (data is not chunked for training)
+  use_naive_recurrent_policy: False
+  # whether to use rnn policy (data is chunked for training)
+  use_recurrent_policy: False
+  # number of recurrent layers
+  recurrent_n: 1
+  # length of data chunk; only useful when use_recurrent_policy is True; episode_length has to be a multiple of data_chunk_length
+  data_chunk_length: 10
+  # optimizer parameters
+  # actor learning rate; pre-registered menu: 0.0003 or 0.0001. Override with
+  # --lr X --critic_lr X together: --lr alone leaves the critic rate unchanged.
+  lr: 0.0003
+  # critic learning rate (kept equal to lr)
+  critic_lr: 0.0003
+  # eps in Adam
+  opti_eps: 0.00001
+  # weight_decay in Adam
+  weight_decay: 0
+  # parameters of diagonal Gaussian distribution
+  std_x_coef: 1
+  # parameters of diagonal Gaussian distribution
+  std_y_coef: 0.5
+algo:
+  # ppo parameters
+  # number of epochs for actor update
+  ppo_epoch: 5
+  # number of epochs for critic update
+  critic_epoch: 5
+  # whether to use clipped value loss
+  use_clipped_value_loss: False
+  # clip parameter
+  clip_param: 0.5
+  # number of mini-batches per epoch for actor update
+  actor_num_mini_batch: 8
+  # number of mini-batches per epoch for critic update
+  critic_num_mini_batch: 8
+  # coefficient for entropy term in actor loss (pre-registered menu: 0.1 or 0.01)
+  entropy_coef: 0.1
+  # coefficient for value loss
+  value_loss_coef: 1
+  # whether to clip gradient norm
+  use_max_grad_norm: True
+  # max gradient norm
+  max_grad_norm: 0.5
+  # whether to use Generalized Advantage Estimation (GAE)
+  use_gae: True
+  # discount factor
+  gamma: 0.995
+  # GAE lambda
+  gae_lambda: 0.9
+  # whether to use huber loss
+  use_huber_loss: False
+  # whether to use policy active masks
+  use_policy_active_masks: True
+  # huber delta
+  huber_delta: 10.0
+  # method of aggregating the probability of multi-dimensional actions, choose from prod, mean
+  action_aggregation: prod
+  # whether to share parameter among actors
+  share_param: False
+  # whether to use a fixed optimisation order
+  fixed_order: False
+logger:
+  # logging directory
+  log_dir: "./results"
+  wandb:
+    enabled: false
+    mode: disabled
+    project: sustaindc-thesis
+    entity: null
+    group: null
+    tags: []
+    log_artifacts: false
+    artifact_aliases: [latest]
+    failure_policy: local_only

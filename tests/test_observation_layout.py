@@ -79,7 +79,7 @@ def test_widths_are_the_expected_values():
     obs = env.reset()
     assert obs["agent_ls"].shape[0] == 40, obs["agent_ls"].shape
     assert obs["agent_dc"].shape[0] == 29, obs["agent_dc"].shape
-    assert obs["agent_bat"].shape[0] == 29, obs["agent_bat"].shape
+    assert obs["agent_bat"].shape[0] == 30, obs["agent_bat"].shape
 
 
 def test_shared_prefix_is_identical_across_agents():
@@ -155,7 +155,7 @@ def test_pv_block_precedes_and_does_not_displace_trailing_price_block():
 def test_pv_observation_widths_and_shared_critic_width_are_pinned():
     env = _get_env()
     obs = env.reset()
-    assert [obs[a].shape[0] for a in env.agents] == [40, 29, 29]
+    assert [obs[a].shape[0] for a in env.agents] == [40, 29, 30]
     # The non-overlapping critic also receives the battery's measured
     # previous load and uncapped running peak.
     assert obs["agent_ls"].shape[0] + 3 + 3 == 46
@@ -192,6 +192,39 @@ def test_battery_previous_load_and_uncapped_peak_are_causal():
     assert larger_obs["agent_bat"][peak_index] > 1.0
     assert np.isclose(larger_obs["agent_bat"][peak_index],
                       larger_info["agent_bat"]["billing_running_peak_kw"] / 10000.0)
+
+
+def test_battery_observes_real_month_fraction():
+    """The battery's demand-charge strategy needs to see where in the billing
+    month the decision interval sits; billing_progress is constant 0.0 under
+    tariffs with no tier threshold, so a real calendar month fraction is the
+    only month-position signal."""
+    env = _get_env()
+    frac_index = SustainDC.BAT_IDX["month_fraction"]
+    assert frac_index == SustainDC.BAT_IDX["billing_peak_ratio"] + 1
+
+    # First interval of a calendar month -> exactly 0.0.
+    obs = env.reset(seed=102, options={"init_day": 31, "init_hour": 0})
+    assert np.isclose(obs["agent_bat"][frac_index], 0.0)
+
+    # Mid-January: 14 of January's 31 days have elapsed.
+    obs = env.reset(seed=102, options={"init_day": 14, "init_hour": 0})
+    assert np.isclose(obs["agent_bat"][frac_index], 14.0 / 31.0)
+
+    # One 15-minute step advances the fraction by 0.25 h / (31 d * 24 h).
+    actions = {"agent_ls": 1, "agent_dc": 1, "agent_bat": 2}
+    next_obs, _, _, _, _ = env.step(actions)
+    assert np.isclose(next_obs["agent_bat"][frac_index],
+                      (14.0 * 24.0 + 0.25) / (31.0 * 24.0))
+
+    # The last hour of February sits just under 1.0, and the fraction wraps
+    # to 0.0 on the first March decision interval.
+    obs = env.reset(seed=102, options={"init_day": 58, "init_hour": 23})
+    assert np.isclose(obs["agent_bat"][frac_index], 671.0 / 672.0)
+    for _ in range(4):
+        obs, _, _, _, _ = env.step(actions)
+        assert 0.0 <= obs["agent_bat"][frac_index] < 1.0
+    assert np.isclose(obs["agent_bat"][frac_index], 0.0)
 
 
 def test_price_block_is_the_last_three_slots_of_every_agent():
@@ -236,6 +269,64 @@ def test_fp_shared_critic_space_adds_agent_identity_features():
     assert all(space.shape == (49,) for space in env.share_observation_space.values())
 
 
+def _battery_only_config(state_type):
+    """The battery as the only learner; the base agents hold workload and cooling."""
+    return dict(_ENV_CONFIG, agents=["agent_bat"], state_type=state_type,
+                partial_obs=True, nonoverlapping_shared_obs_space=True)
+
+
+def test_battery_only_critic_space_is_the_battery_box_plus_the_fp_identity_slot():
+    """With one agent there is no ls or dc state to borrow features from, so the
+    critic observes the battery's own observation: its Box unchanged, plus the
+    one identity slot under FP (bounded [0, 1] like every identity feature)."""
+    from harl.envs.sustaindc.sustaindc_ptzoo import SustainDCPettingZooEnv
+
+    for state_type, extra in (("FP", 1), ("EP", 0)):
+        env = SustainDCPettingZooEnv(_battery_only_config(state_type))
+        battery = env.observation_spaces["agent_bat"]
+        shared = env.share_observation_space["agent_bat"]
+        assert list(env.share_observation_space) == ["agent_bat"], state_type
+        assert battery.shape == (30,), battery.shape
+        assert shared.shape == (30 + extra,), (state_type, shared.shape)
+        assert np.array_equal(shared.low[:30], battery.low), state_type
+        assert np.array_equal(shared.high[:30], battery.high), state_type
+        assert np.array_equal(shared.low[30:], np.zeros(extra)), state_type
+        assert np.array_equal(shared.high[30:], np.ones(extra)), state_type
+
+
+def test_battery_only_critic_observation_is_the_battery_observation():
+    """The three-agent builder picks dc and battery features out of states[1] and
+    states[2] by position; a one-agent state tuple has neither (IndexError on
+    reset). The critic must get the same vector the battery actor gets, plus the
+    identity slot under FP, at reset and after a step, matching the declared
+    share-space width, with the identity slot inside its declared [0, 1] bounds.
+
+    The battery slice is deliberately not checked with Box.contains(): the shipped
+    battery Box declares the CI-percentile feature (index 9) as [-1, 1] while the
+    observation clips it to [-2, 2], so even the actor's own observation fails
+    contains() -- in the three-agent layout too. That predates, and is independent
+    of, the critic layout under test."""
+    from harl.envs.sustaindc.harlsustaindc_env import HARLSustainDCEnv
+
+    for state_type, extra in (("FP", 1), ("EP", 0)):
+        env = HARLSustainDCEnv(_battery_only_config(state_type))
+        try:
+            actor_obs, shared_obs, _ = env.reset(seed=102, options={"init_day": 14, "init_hour": 0})
+            stepped_actor_obs, stepped_shared_obs = env.step(np.array([2]))[:2]
+            for actor, shared in ((actor_obs, shared_obs), (stepped_actor_obs, stepped_shared_obs)):
+                assert len(actor) == len(shared) == 1, (state_type, len(actor), len(shared))
+                assert actor[0].shape == (30,), actor[0].shape
+                assert shared[0].shape == (30 + extra,), (state_type, shared[0].shape)
+                assert np.allclose(shared[0][:30], actor[0]), state_type
+                assert np.array_equal(shared[0][30:], np.ones(extra)), state_type
+                declared = env.share_observation_space[0]
+                assert declared.shape == shared[0].shape, (state_type, declared.shape, shared[0].shape)
+                slot = shared[0][30:]
+                assert np.all((slot >= declared.low[30:]) & (slot <= declared.high[30:])), state_type
+        finally:
+            env.close()
+
+
 def test_padded_battery_peak_bounds_do_not_leak_into_other_features():
     from harl.envs.sustaindc.harlsustaindc_env import HARLSustainDCEnv
 
@@ -256,7 +347,7 @@ def test_padded_battery_peak_bounds_do_not_leak_into_other_features():
         assert actor_obs[2][peak_index] <= env.observation_space[2].high[peak_index]
         assert shared_obs[2][45] <= env.share_observation_space[2].high[45]
         assert np.isfinite(env.observation_space[2].high).all()
-        assert np.all(env.observation_space[2].high[29:] <= 10.0)
+        assert np.all(env.observation_space[2].high[30:] <= 10.0)
     finally:
         env.close()
 

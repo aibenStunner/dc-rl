@@ -1,3 +1,4 @@
+import bisect
 import os
 import sys
 import random
@@ -180,6 +181,8 @@ class EnvConfig(dict):
                     raise ValueError(f"{key} must be a mapping")
                 if key == "reward" and val.get("mode") == "team_tariff_targeted_safeguards":
                     self[key] = _targeted_reward_defaults()
+                elif key == "reward" and val.get("mode") == "battery_tariff_delta":
+                    self[key] = _battery_tariff_delta_reward_defaults()
                 unknown = set(val) - set(self[key])
                 if unknown:
                     raise ValueError(f"{key}.{min(unknown, key=repr)} is unknown")
@@ -201,6 +204,15 @@ def _targeted_reward_defaults():
         "dc_thermal_penalty_weight": 0.75,
         "dc_constraint_penalty_weight": 0.40,
         "dc_max_rack_inlet_c": 0.0,
+    }
+
+
+def _battery_tariff_delta_reward_defaults():
+    # Battery wear is charged at its full modeled cost unless overridden.
+    return {
+        "mode": "battery_tariff_delta",
+        "scale": 0.01,
+        "degradation_cost_weight": 1.0,
     }
 
 
@@ -264,7 +276,7 @@ def _validate_env_config(config):
         if isinstance(value, bool) or not np.isfinite(float(value)) or float(value) <= 0:
             raise ValueError('datacenter_capacity_mw must be finite and positive')
     mode = config["reward"]["mode"]
-    if mode not in {"legacy", "team_tariff_targeted_safeguards"}:
+    if mode not in {"legacy", "team_tariff_targeted_safeguards", "battery_tariff_delta"}:
         raise ValueError(f"reward.mode {mode!r} is unsupported")
     if config["episode_start_policy"] not in {"legacy_random", "valid_midnight", "calendar_month"}:
         raise ValueError("episode_start_policy must be legacy_random, valid_midnight or calendar_month")
@@ -282,6 +294,21 @@ def _validate_env_config(config):
             if key == "mode":
                 continue
             if not np.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"reward.{key} must be finite and non-negative")
+        if config["reward"]["scale"] == 0.0:
+            raise ValueError("reward.scale must be positive")
+    if mode == "battery_tariff_delta":
+        # The no-battery counterfactual bill is exact only while battery
+        # actions cannot change facility load, i.e. workload and cooling are
+        # fixed rules and the battery is the only learner.
+        if not config["agents"] or list(config["agents"]) != ["agent_bat"]:
+            raise ValueError("battery_tariff_delta requires agents == ['agent_bat']")
+        if config["episode_start_policy"] not in {"valid_midnight", "calendar_month"}:
+            raise ValueError("battery_tariff_delta requires valid_midnight or calendar_month")
+        for key, value in config["reward"].items():
+            if key == "mode":
+                continue
+            if isinstance(value, bool) or not np.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError(f"reward.{key} must be finite and non-negative")
         if config["reward"]["scale"] == 0.0:
             raise ValueError("reward.scale must be positive")
@@ -446,6 +473,17 @@ class SustainDC(gym.Env):
             datacenter_capacity_mw=self.datacenter_capacity_mw,
             future_steps=n_vars_ci,
         )
+        # Battery-only reward: a second, independent pricing model meters the
+        # same facility load with the battery idle. It feeds only the reward;
+        # observations, billing and evaluation use price_m alone.
+        self._counterfactual_price_m = (
+            PriceManager.from_config(
+                self.pricing_config,
+                datacenter_capacity_mw=self.datacenter_capacity_mw,
+                future_steps=n_vars_ci,
+            )
+            if self.reward_config["mode"] == "battery_tariff_delta" else None
+        )
 
         # This actions_are_logits is True only for MADDPG if isscontinuous actions is used on the algorithm.
         self.actions_are_logits = env_config.get("actions_are_logits", False)
@@ -566,7 +604,8 @@ class SustainDC(gym.Env):
         "next_out_temp": OBS_PREFIX_LEN + 3,
         "setpoint_ratio": OBS_PREFIX_LEN + 4,
     }
-    # bat_state middle: workload, temperature, SoC, gross DC load, billing peak.
+    # bat_state middle: workload, temperature, SoC, gross DC load, billing
+    # peak, month fraction.
     # The gross-load slot holds the previous interval's load in reset/step
     # observations; begin_step's decision observation ('current' timing)
     # replaces it with this interval's load, metered before battery dispatch.
@@ -576,7 +615,20 @@ class SustainDC(gym.Env):
         "battery_soc": OBS_PREFIX_LEN + 2,
         "previous_facility_load_ratio": OBS_PREFIX_LEN + 3,
         "billing_peak_ratio": OBS_PREFIX_LEN + 4,
+        "month_fraction": OBS_PREFIX_LEN + 5,
     }
+
+    @staticmethod
+    def _month_fraction_of(day_of_year, hour):
+        """Fraction of the decision interval's calendar month already elapsed,
+        in [0, 1): 0.0 at the month's first interval, just under 1.0 at its
+        last (non-leap calendar months, matching the billing period)."""
+        day = int(day_of_year) % 365
+        month_index = bisect.bisect_right(_MONTH_START_DAYS, day) - 1
+        month_start = _MONTH_START_DAYS[month_index]
+        month_end = (*_MONTH_START_DAYS[1:], 365)[month_index]
+        return (((day - month_start) * 24.0 + float(hour))
+                / ((month_end - month_start) * 24.0))
 
     def _pv_feature_block(self):
         """Current normalized PV AC plus the next eight interval forecasts."""
@@ -749,6 +801,7 @@ class SustainDC(gym.Env):
                                           battery_soc,
                                           self._facility_load_ratio(previous_facility_load_kw),
                                           self.price_m.state.running_peak_kw / (self.datacenter_capacity_mw * 1000.0),
+                                          self._decision_month_fraction,
                                           pv_features,
                                           price_features
                                         )))
@@ -824,6 +877,8 @@ class SustainDC(gym.Env):
             random_init_day = random.randint(max(0, self.ranges_day[0]), min(364, self.ranges_day[1]))
             random_init_hour = random.randint(0, 23)
         self.current_hour = random_init_hour
+        self._decision_month_fraction = self._month_fraction_of(
+            random_init_day, random_init_hour)
         if self.episode_start_policy == "calendar_month":
             month_index = _MONTH_START_DAYS.index(random_init_day)
             month_end = (*_MONTH_START_DAYS[1:], 365)[month_index]
@@ -838,6 +893,8 @@ class SustainDC(gym.Env):
         ci_i, ci_i_future, ci_i_denorm = self.ci_m.reset(init_day=random_init_day, init_hour=random_init_hour)  # CI manager. ci_i -> CI in the current timestep.
         # Preserve model-neutral billing state across normal resets.
         self.price_m.reset(init_day=random_init_day, init_hour=random_init_hour)
+        if self._counterfactual_price_m is not None:
+            self._counterfactual_price_m.reset(init_day=random_init_day, init_hour=random_init_hour)
 
         # Set the external ambient temperature to data center environment
         self.dc_env.set_ambient_temp(temp, wet_bulb)
@@ -973,11 +1030,25 @@ class SustainDC(gym.Env):
             day_of_year=billed_day,
             hour=billed_hour,
         )
+        counterfactual_charges = None
+        if self._counterfactual_price_m is not None:
+            # The same facility load and PV with the battery idle; like the
+            # real meter, PV surplus is curtailed, never exported.
+            counterfactual_charges = self._counterfactual_price_m.step(
+                metered_energy_kwh=max(
+                    0.0,
+                    self.bat_info['bat_total_energy_without_battery_KWh']
+                    - self.bat_info['pv_ac_kwh'],
+                ),
+                day_of_year=billed_day,
+                hour=billed_hour,
+            )
         # Agents act next on the advanced clock; observe its price there
         # without touching the charges above.
         self.price_m.observe_decision_clock(day_of_year=day, hour=hour)
 
         self.current_hour = hour
+        self._decision_month_fraction = self._month_fraction_of(day, hour)
 
         # Update environment states with new values from managers
         self._update_environments(workload, temp, wet_bulb, ci_i_denorm, ci_i_future, day, hour)
@@ -1009,6 +1080,11 @@ class SustainDC(gym.Env):
         # A truncation can end before the model reaches its calendar boundary;
         # settle any pending billing-period charge before forming reward/info.
         settlement = self.price_m.settle_pending_period() if terminal else PricingCharges(0.0, 0.0, 0.0)
+        counterfactual_settlement = (
+            self._counterfactual_price_m.settle_pending_period()
+            if terminal and self._counterfactual_price_m is not None
+            else PricingCharges(0.0, 0.0, 0.0)
+        )
 
         # Calculate rewards for all agents based on the updated state
         terminal_soc_settlement = self._terminal_soc_settlement(terminal)
@@ -1016,6 +1092,8 @@ class SustainDC(gym.Env):
             workload, temp, ci_i, ci_i_future, day, hour, terminal,
             step_charges, settlement, terminal_soc_settlement,
             billed_day=billed_day, billed_hour=billed_hour,
+            counterfactual_charges=counterfactual_charges,
+            counterfactual_settlement=counterfactual_settlement,
         )
         self.ls_reward, self.dc_reward, self.bat_reward = self.calculate_reward(reward_params)
 
@@ -1150,7 +1228,7 @@ class SustainDC(gym.Env):
 
 
     def _terminal_soc_settlement(self, terminal):
-        if self.reward_config["mode"] != "team_tariff_targeted_safeguards":
+        if self.reward_config["mode"] not in {"team_tariff_targeted_safeguards", "battery_tariff_delta"}:
             return {
                 "bat_terminal_soc_penalty_component": 0.0,
                 "bat_terminal_soc_start": self._episode_start_soc,
@@ -1187,6 +1265,8 @@ class SustainDC(gym.Env):
         self, workload, temp, ci_i, ci_i_future, day, hour, terminal,
         step_charges=None, settlement=PricingCharges(0.0, 0.0, 0.0),
         terminal_soc_settlement=None, billed_day=None, billed_hour=None,
+        counterfactual_charges=None,
+        counterfactual_settlement=PricingCharges(0.0, 0.0, 0.0),
     ):
         """Create the parameters needed to calculate rewards."""
         if step_charges is None:
@@ -1201,8 +1281,28 @@ class SustainDC(gym.Env):
         total_cost = energy_cost + demand_cost + additional_cost
         if terminal_soc_settlement is None:
             terminal_soc_settlement = self._terminal_soc_settlement(False)
+        counterfactual = {}
+        if counterfactual_charges is not None:
+            # Summed exactly as the actual bill above, so an idle battery's
+            # two bills agree bit for bit.
+            counterfactual_energy = (
+                counterfactual_charges.energy_cost_c
+                + counterfactual_settlement.energy_cost_c
+            )
+            counterfactual_demand = (
+                counterfactual_charges.demand_cost_increment_c
+                + counterfactual_settlement.demand_cost_increment_c
+            )
+            counterfactual_additional = (
+                counterfactual_charges.additional_cost_increment_c
+                + counterfactual_settlement.additional_cost_increment_c
+            )
+            counterfactual["counterfactual_cost_this_step_c"] = (
+                counterfactual_energy + counterfactual_demand + counterfactual_additional
+            )
         return {
             **self.bat_info, **self.ls_info, **self.dc_info, **terminal_soc_settlement,
+            **counterfactual,
             "outside_temp": temp, "day": day, "hour": hour,
             "norm_CI": ci_i_future[0], "forecast_CI": ci_i_future,
             "isterminal": terminal,
@@ -1273,6 +1373,22 @@ class SustainDC(gym.Env):
 
         if self.reward_config["mode"] == "team_tariff_targeted_safeguards":
             rewards, components = reward_creator.team_tariff_targeted_safeguards(
+                params, self.reward_config
+            )
+            params.update(components)
+            params.update({
+                "agent_ls_reward": rewards["agent_ls"],
+                "agent_dc_reward": rewards["agent_dc"],
+                "agent_bat_reward": rewards["agent_bat"],
+            })
+            return (
+                rewards["agent_ls"],
+                rewards["agent_dc"],
+                rewards["agent_bat"],
+            )
+
+        if self.reward_config["mode"] == "battery_tariff_delta":
+            rewards, components = reward_creator.battery_tariff_delta(
                 params, self.reward_config
             )
             params.update(components)
